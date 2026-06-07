@@ -498,12 +498,17 @@ async fn copy_to_saf(
     source_path: &str,
     mime_type: &str,
 ) -> Result<(), String> {
-    let args = serde_wasm_bindgen::to_value(&SafCopyArgs {
-        tree_uri: tree_uri.into(),
-        relative_path: relative_path.into(),
-        source_path: source_path.into(),
-        mime_type: mime_type.into(),
-    })
+    // Plugin commands take a single `payload` parameter, so the invoke args must
+    // be wrapped under "payload" (otherwise Tauri reports "missing required key
+    // payload" and the SAF mirror silently fails).
+    let args = serde_wasm_bindgen::to_value(&serde_json::json!({
+        "payload": SafCopyArgs {
+            tree_uri: tree_uri.into(),
+            relative_path: relative_path.into(),
+            source_path: source_path.into(),
+            mime_type: mime_type.into(),
+        }
+    }))
     .map_err(|error| error.to_string())?;
     invoke("plugin:palm-native|saf_copy_from_path", args)
         .await
@@ -513,8 +518,7 @@ async fn copy_to_saf(
 
 async fn delete_from_saf(tree_uri: &str, relative_path: &str) -> Result<(), String> {
     let args = serde_wasm_bindgen::to_value(&serde_json::json!({
-        "treeUri": tree_uri,
-        "relativePath": relative_path
+        "payload": { "treeUri": tree_uri, "relativePath": relative_path }
     }))
     .map_err(|error| error.to_string())?;
     invoke("plugin:palm-native|saf_delete", args)
@@ -541,7 +545,9 @@ async fn delete_temporary_frames(frames: Vec<CapturedFrame>) {
         .into_iter()
         .flatten()
         {
-            if let Ok(args) = serde_wasm_bindgen::to_value(&TempPathArgs { path }) {
+            if let Ok(args) =
+                serde_wasm_bindgen::to_value(&serde_json::json!({ "payload": { "path": path } }))
+            {
                 let _ = invoke("plugin:palm-native|temp_delete", args).await;
             }
         }
@@ -602,7 +608,7 @@ async fn import_saf_folder() -> Result<Option<Vec<Session>>, String> {
         return Ok(None);
     };
     let tree_args = serde_wasm_bindgen::to_value(&serde_json::json!({
-        "treeUri": folder.uri.clone()
+        "payload": { "treeUri": folder.uri.clone() }
     }))
     .map_err(|error| error.to_string())?;
     let value = invoke("plugin:palm-native|saf_copy_tree_to_temp", tree_args)
