@@ -18,6 +18,8 @@ The legacy JavaScript application remains a read-only behavioral reference.
 
 ## Documentation
 
+- **[ROADMAP.md](ROADMAP.md)** — where this app is going: mission, north star,
+  phases, and the completion gate that defines "drop-in replacement".
 - **[BUILD.md](BUILD.md)** — from-scratch setup on a new machine: what to install,
   clone, compile, and install the APK (start here to build).
 - **[STATUS.md](STATUS.md)** — implemented-vs-pending feature matrix and the
