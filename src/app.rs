@@ -2464,20 +2464,73 @@ fn DepthViewer(tree_id: Option<String>) -> Element {
 
 #[component]
 fn Settings(data_root: String) -> Element {
+    let mut saf = use_signal(|| "Not selected".to_string());
+    let mut camera = use_signal(|| "Tap to check".to_string());
+    let mut orbbec = use_signal(|| "Tap to refresh".to_string());
+    let mut notice = use_signal(|| None::<String>);
+
     rsx! {
         div { class: "settings-list",
+            if let Some(message) = notice.read().as_ref() {
+                div { class: "inline-error", "{message}" }
+            }
             section { h2 { "Local primary store" } code { "{data_root}" } }
-            SettingRow { title: "SAF export folder", value: "Not selected", action: "Choose folder" }
-            SettingRow { title: "Offline detector", value: "ffb-detector.onnx / 640 px", action: "Verify model" }
-            SettingRow { title: "Camera source", value: "CameraX with controlled fallback", action: "Check permission" }
-            SettingRow { title: "Orbbec USB", value: "Vendor 0x2BC5 / arm64", action: "Refresh" }
+            div { class: "setting-row",
+                div { strong { "SAF export folder" } span { "{saf}" } }
+                button { class: "button secondary",
+                    onclick: move |_| {
+                        notice.set(None);
+                        spawn(async move {
+                            match pick_saf_folder().await {
+                                Ok(Some(folder)) => {
+                                    let label = if folder.name.is_empty() { folder.uri } else { folder.name };
+                                    saf.set(label);
+                                }
+                                Ok(None) => {}
+                                Err(message) => notice.set(Some(message)),
+                            }
+                        });
+                    },
+                    "Choose folder"
+                }
+            }
+            div { class: "setting-row",
+                div { strong { "Camera (CameraX)" } span { "{camera}" } }
+                button { class: "button secondary",
+                    onclick: move |_| {
+                        spawn(async move {
+                            match native_empty::<serde_json::Value>("plugin:palm-native|camera_status").await {
+                                Ok(value) => {
+                                    let granted = value.get("permission").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                                    camera.set(if granted { "Permission granted".into() } else { "Permission not granted".into() });
+                                }
+                                Err(message) => camera.set(format!("Error: {message}")),
+                            }
+                        });
+                    },
+                    "Check permission"
+                }
+            }
+            div { class: "setting-row",
+                div { strong { "Orbbec USB" } span { "{orbbec}" } }
+                button { class: "button secondary",
+                    onclick: move |_| {
+                        spawn(async move {
+                            match native_empty::<serde_json::Value>("plugin:palm-native|orbbec_status").await {
+                                Ok(value) => {
+                                    let count = value.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                                    orbbec.set(if count > 0 { format!("{count} device(s) attached") } else { "Not attached".into() });
+                                }
+                                Err(message) => orbbec.set(format!("Error: {message}")),
+                            }
+                        });
+                    },
+                    "Refresh"
+                }
+            }
+            section { h2 { "Offline detector" } code { "ffb-detector.onnx / 640 px" } }
         }
     }
-}
-
-#[component]
-fn SettingRow(title: &'static str, value: &'static str, action: &'static str) -> Element {
-    rsx! { div { class: "setting-row", div { strong { "{title}" } span { "{value}" } } button { class: "button secondary", "{action}" } } }
 }
 
 #[component]

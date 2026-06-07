@@ -136,7 +136,7 @@ see hypotheses §6.
 |---|---|---|
 | **annotlog** | backend writer added (`storage.rs save_tree` → `dataset/annotlog/{split}/{tree}_{side}.json`); UI sets `original_bboxes` on detector run | Verify the sidecar files are written on device and contain non-empty `suggestions` after running the detector, and `final` after editing. |
 | **cacheBust** | added: token stamped per side in `capture_commit`; appended `?v=` to image URLs in `app.rs` | Verify reusing a tree id does NOT show a stale cached photo. Confirm `?v=` doesn't break the asset URL (see §6). |
-| **Settings page** | **STILL A STUB** (`fn Settings` in `app.rs`): buttons "Choose folder / Verify model / Check permission / Refresh" have **no onclick**. | Wire them: "Choose folder" → `pick_saf_folder()`; "Check permission" → camera permission; "Refresh" → `orbbec_status`; "Verify model" → detector model check. Show real values (current SAF folder, etc.). |
+| **Settings page** | **NOW WIRED** (`fn Settings`): "Choose folder" → `pick_saf_folder()` (shows chosen folder), "Check permission" → `camera_status` (shows granted/not), "Refresh" → `orbbec_status` (shows device count). | Verify each on device. NOTE: the chosen SAF folder here is **not yet persisted globally** (sessions still set their own `export_uri`); add global persistence if the JS "Export folder" global setting must match. |
 | **Export trigger** | Rust auto-exports ALL files inside `tree_compute` (`write_tree_exports`); JS uses separate manual buttons (exportYolo/JSON/CSV/identity/yoloWithMismatch). | Decide if auto-on-compute is acceptable parity (same files produced) or add explicit per-type export actions to match JS UX. |
 | **Quality checks** | At parity (Rust `quality.rs` covers variety/block/timestamp/operator/GPS-missing/GPS-low-accuracy>25m/side-count/view/empty/depth/links/unassigned/class-mismatch). Messages are English by design. | Spot-check codes against `js/quality-check.js`. JS also had `metadata_tree_id_missing` (N/A in Rust since tree id always exists). |
 | **Delete cascade** | `delete_tree` recurses `dataset/`, `Output TXT/`, `snapshots/` by tree name (now also removes annotlog) + Output JSON + SAF mirror via `delete_from_saf`. | Verify Delete Tree/Session removes images, depth sidecars, Output JSON/TXT, annotlog, snapshots, and SAF-mirrored files. |
@@ -181,9 +181,10 @@ stat-cards + New Session + recent list; shrank oversized headings/paddings app-w
 decorative "eyebrow" labels + verbose descriptions on all pages; hid the topbar on Home.
 
 Still to do (from the latest device screenshots):
-- Work pages (Capture/Review/Annotate/Dedup/Results/Depth) still have a **large empty left
-  column** (the old `work-layout` two-column grid). Rework to put controls above/around the
-  content panel so the screen isn't half-empty on the 11" tablet.
+- DONE: `work-layout` is now a single column (title + actions on a top row, content panel
+  full-width below) — fixes the half-empty left column on Capture/Review/Dedup/Depth/Results.
+- `annotation-layout` / `annotation-workspace` (Annotate) still use a fixed multi-column grid
+  and may show gaps on tablet — verify and stack similarly if needed.
 - Tablet 3:2 11" is **HIGH priority**; phone 9:16 6" is low priority (phone has minor
   horizontal overflow to clean up).
 - Keep removing chrome that doesn't earn its space (e.g. the persistent device-status strip,
