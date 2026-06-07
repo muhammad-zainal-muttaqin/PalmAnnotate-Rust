@@ -16,8 +16,16 @@ The legacy JavaScript application remains a read-only behavioral reference.
 - Android debug APK for `arm64-v8a`; desktop packaging, AAB, and release signing
   are outside the migration scope.
 
-See [REQUIREMENTS.md](REQUIREMENTS.md), [docs/architecture.md](docs/architecture.md),
-and [docs/android-build.md](docs/android-build.md).
+## Documentation
+
+- **[BUILD.md](BUILD.md)** — from-scratch setup on a new machine: what to install,
+  clone, compile, and install the APK (start here to build).
+- **[STATUS.md](STATUS.md)** — implemented-vs-pending feature matrix and the
+  current "is it a drop-in replacement yet?" answer.
+- **[CHANGELOG.md](CHANGELOG.md)** — dated record of changes and on-device fixes.
+- **[HANDOFF.md](HANDOFF.md)** — on-device debugging (adb, logcat, WebView DevTools).
+- [REQUIREMENTS.md](REQUIREMENTS.md), [docs/architecture.md](docs/architecture.md),
+  [docs/android-build.md](docs/android-build.md) — formal contract and architecture.
 
 ## Repository Layout
 
