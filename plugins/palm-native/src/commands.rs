@@ -24,7 +24,9 @@ empty_command!(orbbec_request_permission);
 empty_command!(orbbec_open);
 empty_command!(orbbec_capture);
 empty_command!(orbbec_close);
+empty_command!(orbbec_refresh);
 empty_command!(saf_pick_folder);
+empty_command!(saf_pick_json);
 
 #[tauri::command]
 pub(crate) async fn temp_delete<R: Runtime>(
@@ -40,6 +42,14 @@ pub(crate) async fn saf_release_folder<R: Runtime>(
     payload: TreeRequest,
 ) -> Result<JsonResponse> {
     app.palm_native().run("saf_release_folder", payload)
+}
+
+#[tauri::command]
+pub(crate) async fn saf_validate<R: Runtime>(
+    app: AppHandle<R>,
+    payload: TreeRequest,
+) -> Result<JsonResponse> {
+    app.palm_native().run("saf_validate", payload)
 }
 
 #[tauri::command]

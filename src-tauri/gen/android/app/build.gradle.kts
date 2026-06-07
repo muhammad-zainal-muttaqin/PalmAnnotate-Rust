@@ -32,20 +32,28 @@ android {
     buildTypes {
         getByName("debug") {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
-            isDebuggable = true
-            isJniDebuggable = true
-            isMinifyEnabled = false
-            // Native debug symbols are stripped by AGP at packaging time (default).
-            // We intentionally do NOT keep them, so the debug .so stays small.
+            isDebuggable = false
+            isJniDebuggable = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
         getByName("release") {
-            // Keep R8/minify OFF to guarantee runtime parity with the working app
-            // (the webview + Tauri plugins). The size win comes from the optimized,
-            // stripped Rust .so, not from shrinking the ~10 MB of dex.
-            isMinifyEnabled = false
-            // Sign the release APK with the auto-generated debug keystore so it
-            // installs directly as a drop-in replacement (no manual signing needed).
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
     compileOptions {

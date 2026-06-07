@@ -4,6 +4,34 @@ use std::collections::BTreeMap;
 pub const SCHEMA_VERSION: u8 = 4;
 pub const UNASSIGNED_CLASS_ID: i32 = -1;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    #[serde(default)]
+    pub export_uri: String,
+    #[serde(default)]
+    pub export_name: String,
+    #[serde(default = "default_recent_varieties")]
+    pub recent_varieties: Vec<String>,
+    #[serde(default)]
+    pub recent_blocks: Vec<String>,
+}
+
+fn default_recent_varieties() -> Vec<String> {
+    vec!["DAMIMAS".into()]
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            export_uri: String::new(),
+            export_name: String::new(),
+            recent_varieties: default_recent_varieties(),
+            recent_blocks: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {

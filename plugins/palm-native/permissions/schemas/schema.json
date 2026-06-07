@@ -391,6 +391,18 @@
           "markdownDescription": "Denies the orbbec_open command without any pre-configured scope."
         },
         {
+          "description": "Enables the orbbec_refresh command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-orbbec-refresh",
+          "markdownDescription": "Enables the orbbec_refresh command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the orbbec_refresh command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-orbbec-refresh",
+          "markdownDescription": "Denies the orbbec_refresh command without any pre-configured scope."
+        },
+        {
           "description": "Enables the orbbec_request_permission command without any pre-configured scope.",
           "type": "string",
           "const": "allow-orbbec-request-permission",
@@ -487,6 +499,18 @@
           "markdownDescription": "Denies the saf_pick_folder command without any pre-configured scope."
         },
         {
+          "description": "Enables the saf_pick_json command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-saf-pick-json",
+          "markdownDescription": "Enables the saf_pick_json command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the saf_pick_json command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-saf-pick-json",
+          "markdownDescription": "Denies the saf_pick_json command without any pre-configured scope."
+        },
+        {
           "description": "Enables the saf_read_to_temp command without any pre-configured scope.",
           "type": "string",
           "const": "allow-saf-read-to-temp",
@@ -509,6 +533,18 @@
           "type": "string",
           "const": "deny-saf-release-folder",
           "markdownDescription": "Denies the saf_release_folder command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the saf_validate command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-saf-validate",
+          "markdownDescription": "Enables the saf_validate command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the saf_validate command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-saf-validate",
+          "markdownDescription": "Denies the saf_validate command without any pre-configured scope."
         },
         {
           "description": "Enables the saf_write command without any pre-configured scope.",

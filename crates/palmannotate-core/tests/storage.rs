@@ -1,5 +1,5 @@
 use palmannotate_core::{
-    AppError, AppStore, Session, Side, Tree, TreeMetadata, TreeStatus, SCHEMA_VERSION,
+    AppError, AppSettings, AppStore, Session, Side, Tree, TreeMetadata, TreeStatus, SCHEMA_VERSION,
 };
 use std::fs;
 
@@ -53,6 +53,13 @@ fn tree(id: &str, name: &str) -> Tree {
 fn save_tree_updates_owning_session_index() {
     let temp = tempfile::tempdir().unwrap();
     let store = AppStore::new(temp.path()).unwrap();
+    store
+        .save_settings(&AppSettings {
+            export_uri: "content://field-export".into(),
+            export_name: "Field export".into(),
+            ..AppSettings::default()
+        })
+        .unwrap();
     store.save_session(&session("session-1")).unwrap();
 
     store.save_tree(&tree("tree-1", "TREE_0001")).unwrap();
@@ -64,6 +71,59 @@ fn save_tree_updates_owning_session_index() {
     assert_eq!(sessions[0].trees[0].tree_id, 1);
     assert_eq!(sessions[0].trees[0].status, TreeStatus::Captured);
     assert_eq!(sessions[0].next_id, 2);
+    assert!(store
+        .root()
+        .join("Output TXT/field/TREE_0001_1.txt")
+        .is_file());
+}
+
+#[test]
+fn settings_persist_and_become_the_single_session_export_folder() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = AppStore::new(temp.path()).unwrap();
+    assert_eq!(store.load_settings().unwrap(), AppSettings::default());
+
+    let saved = store
+        .save_settings(&AppSettings {
+            export_uri: " content://chosen ".into(),
+            export_name: " Documents ".into(),
+            ..AppSettings::default()
+        })
+        .unwrap();
+    assert_eq!(saved.export_uri, "content://chosen");
+    assert_eq!(saved.export_name, "Documents");
+
+    let mut first = session("session-1");
+    first.export_uri = "content://stale".into();
+    store.save_session(&first).unwrap();
+    assert_eq!(
+        store.list_sessions().unwrap()[0].export_uri,
+        "content://chosen"
+    );
+
+    store
+        .save_settings(&AppSettings {
+            export_uri: "content://replacement".into(),
+            export_name: "USB".into(),
+            ..AppSettings::default()
+        })
+        .unwrap();
+    assert_eq!(
+        store.list_sessions().unwrap()[0].export_uri,
+        "content://replacement"
+    );
+}
+
+#[test]
+fn session_creation_is_blocked_until_global_export_folder_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = AppStore::new(temp.path()).unwrap();
+    let mut pending = session("session-1");
+    pending.export_uri.clear();
+    assert!(matches!(
+        store.save_session(&pending),
+        Err(AppError::Validation(_))
+    ));
 }
 
 #[test]
@@ -161,6 +221,20 @@ fn save_tree_rejects_side_count_mismatch() {
 }
 
 #[test]
+fn save_tree_rejects_unsupported_split() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = AppStore::new(temp.path()).unwrap();
+    store.save_session(&session("session-1")).unwrap();
+    let mut invalid = tree("tree-1", "TREE_0001");
+    invalid.split = "../outside".into();
+
+    assert!(matches!(
+        store.save_tree(&invalid),
+        Err(AppError::Validation(_))
+    ));
+}
+
+#[test]
 fn session_locks_group_and_accepts_legacy_blok_key() {
     let value = serde_json::json!({
         "id": "legacy",
@@ -213,4 +287,104 @@ fn tree_metadata_accepts_legacy_blok_key() {
     let metadata: palmannotate_core::TreeMetadata =
         serde_json::from_value(serde_json::json!({"variety": "DAMIMAS", "blok": "A21B"})).unwrap();
     assert_eq!(metadata.block, "A21B");
+}
+
+#[test]
+fn import_sessions_keeps_existing_and_adds_only_new_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = AppStore::new(temp.path()).unwrap();
+    store.save_session(&session("session-1")).unwrap();
+
+    let mut replacement = session("session-1");
+    replacement.name = "Must not overwrite".into();
+    let incoming = vec![replacement, session("session-2"), session("session-2")];
+    let merged = store.import_sessions(incoming).unwrap();
+
+    assert_eq!(merged.len(), 2);
+    assert_eq!(
+        merged
+            .iter()
+            .find(|session| session.id == "session-1")
+            .unwrap()
+            .name,
+        "Field session"
+    );
+    assert!(merged.iter().any(|session| session.id == "session-2"));
+}
+
+#[test]
+fn sessions_and_trees_are_returned_in_js_display_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = AppStore::new(temp.path()).unwrap();
+    let mut older = session("session-1");
+    older.updated_at = "2026-06-01T00:00:00Z".into();
+    let mut newer = session("session-2");
+    newer.updated_at = "2026-06-02T00:00:00Z".into();
+    store.save_session(&older).unwrap();
+    store.save_session(&newer).unwrap();
+
+    store.save_tree(&tree("tree-10", "TREE_0010")).unwrap();
+    store.save_tree(&tree("tree-2", "TREE_0002")).unwrap();
+
+    let sessions = store.list_sessions().unwrap();
+    assert_eq!(sessions[0].id, "session-1");
+    assert_eq!(
+        sessions[0]
+            .trees
+            .iter()
+            .map(|tree| tree.tree_id)
+            .collect::<Vec<_>>(),
+        [2, 10]
+    );
+}
+
+#[test]
+fn sessions_remember_recent_varieties_and_blocks_most_recent_first() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = AppStore::new(temp.path()).unwrap();
+    store
+        .save_settings(&AppSettings {
+            export_uri: "content://field-export".into(),
+            export_name: "Field export".into(),
+            ..AppSettings::default()
+        })
+        .unwrap();
+
+    let mut first = session("session-1");
+    first.variety = "Tenera".into();
+    first.block = "A01".into();
+    store.save_session(&first).unwrap();
+
+    let mut second = session("session-2");
+    second.variety = "DAMIMAS".into();
+    second.block = "B02".into();
+    store.save_session(&second).unwrap();
+
+    let settings = store.load_settings().unwrap();
+    assert_eq!(settings.recent_varieties, ["DAMIMAS", "Tenera"]);
+    assert_eq!(settings.recent_blocks, ["B02", "A01"]);
+}
+
+#[test]
+fn delete_tree_removes_logs_exports_and_id_named_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = AppStore::new(temp.path()).unwrap();
+    store.save_session(&session("session-1")).unwrap();
+    store.save_tree(&tree("tree-1", "TREE_1")).unwrap();
+
+    let export = store.root().join("exports/TREE_1_result.csv");
+    let snapshot = store.root().join("snapshots/tree-1-side-1-depth.png");
+    let log = store.root().join("dataset/annotlog/field/TREE_1_1.json");
+    fs::create_dir_all(export.parent().unwrap()).unwrap();
+    fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    fs::create_dir_all(log.parent().unwrap()).unwrap();
+    fs::write(&export, b"result").unwrap();
+    fs::write(&snapshot, b"preview").unwrap();
+    fs::write(&log, b"{}").unwrap();
+
+    store.delete_tree("tree-1").unwrap();
+
+    assert!(!export.exists());
+    assert!(!snapshot.exists());
+    assert!(!log.exists());
 }

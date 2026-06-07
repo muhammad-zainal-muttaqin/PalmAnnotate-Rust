@@ -218,6 +218,32 @@ Denies the orbbec_open command without any pre-configured scope.
 <tr>
 <td>
 
+`palm-native:allow-orbbec-refresh`
+
+</td>
+<td>
+
+Enables the orbbec_refresh command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`palm-native:deny-orbbec-refresh`
+
+</td>
+<td>
+
+Denies the orbbec_refresh command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `palm-native:allow-orbbec-request-permission`
 
 </td>
@@ -426,6 +452,32 @@ Denies the saf_pick_folder command without any pre-configured scope.
 <tr>
 <td>
 
+`palm-native:allow-saf-pick-json`
+
+</td>
+<td>
+
+Enables the saf_pick_json command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`palm-native:deny-saf-pick-json`
+
+</td>
+<td>
+
+Denies the saf_pick_json command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `palm-native:allow-saf-read-to-temp`
 
 </td>
@@ -471,6 +523,32 @@ Enables the saf_release_folder command without any pre-configured scope.
 <td>
 
 Denies the saf_release_folder command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`palm-native:allow-saf-validate`
+
+</td>
+<td>
+
+Enables the saf_validate command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`palm-native:deny-saf-validate`
+
+</td>
+<td>
+
+Denies the saf_validate command without any pre-configured scope.
 
 </td>
 </tr>

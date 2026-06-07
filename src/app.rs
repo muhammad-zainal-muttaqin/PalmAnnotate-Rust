@@ -1,10 +1,23 @@
 #![allow(non_snake_case)]
 
+#[path = "annotate.rs"]
+mod annotate;
+#[path = "capture.rs"]
+mod capture;
+#[path = "workflows.rs"]
+mod workflows;
+
 use dioxus::prelude::*;
+use dioxus_web::WebEventExt;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashSet, VecDeque};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+
+use annotate::Annotate;
+use capture::{Capture, Review};
+use workflows::{Dedup, DepthViewer, Results};
 
 /// Bundled stylesheet. Using the `asset!` macro makes Dioxus emit a correctly
 /// resolved (hashed) `<link>` in the built app. A bare `href: "styles.css"` 404s
@@ -38,31 +51,28 @@ enum Page {
     Settings,
 }
 
-impl Page {
-    fn title(self) -> &'static str {
-        match self {
-            Self::Home => "Field sessions",
-            Self::NewSession => "New session",
-            Self::SessionDetail => "Session detail",
-            Self::Capture => "Capture",
-            Self::Review => "Review",
-            Self::Annotate => "Annotate",
-            Self::Dedup => "Dedup",
-            Self::Results => "Results",
-            Self::DepthViewer => "Depth viewer",
-            Self::Settings => "Settings",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct Bootstrap {
     product_name: String,
     schema_version: u8,
     data_root: String,
+    settings: AppSettings,
     sessions: Vec<Session>,
     platform: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AppSettings {
+    #[serde(default)]
+    export_uri: String,
+    #[serde(default)]
+    export_name: String,
+    #[serde(default)]
+    recent_varieties: Vec<String>,
+    #[serde(default)]
+    recent_blocks: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -118,6 +128,11 @@ struct SessionArgs {
     session: Session,
 }
 
+#[derive(Serialize)]
+struct SettingsArgs {
+    settings: AppSettings,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SafFolder {
@@ -132,6 +147,27 @@ struct SafFolder {
 #[derive(Debug, Deserialize)]
 struct NativePath {
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PickedFile {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    cancelled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonImportData {
+    tree_id: String,
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SafValidation {
+    valid: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -305,6 +341,13 @@ struct ExportFileData {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ExportData {
+    export_uri: String,
+    export_files: Vec<ExportFileData>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct ComputationData {
     unique_count: usize,
     raw_count: usize,
@@ -347,6 +390,94 @@ struct LinkSuggestionData {
     category: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnnotationMode {
+    Review,
+    Edit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResizeHandle {
+    NorthWest,
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+}
+
+#[derive(Clone, Debug)]
+enum BoxGesture {
+    Draw {
+        start_x: f64,
+        start_y: f64,
+        current_x: f64,
+        current_y: f64,
+    },
+    Move {
+        bbox_id: String,
+        start_x: f64,
+        start_y: f64,
+        original: BoxData,
+    },
+    Resize {
+        bbox_id: String,
+        handle: ResizeHandle,
+        original: BoxData,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct CanvasViewport {
+    zoom: f64,
+    pan_x: f64,
+    pan_y: f64,
+}
+
+impl CanvasViewport {
+    fn reset() -> Self {
+        Self {
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CanvasPoint {
+    base_x: f64,
+    base_y: f64,
+    image_x: f64,
+    image_y: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PointerContact {
+    id: i32,
+    x: f64,
+    y: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PinchGesture {
+    distance: f64,
+    centroid_x: f64,
+    centroid_y: f64,
+    zoom: f64,
+    pan_x: f64,
+    pan_y: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SwipeGesture {
+    pointer_id: i32,
+    start_x: f64,
+    start_y: f64,
+}
+
 #[derive(Serialize)]
 struct CaptureCommitArgs {
     request: serde_json::Value,
@@ -356,6 +487,13 @@ struct CaptureCommitArgs {
 #[serde(rename_all = "camelCase")]
 struct TreeIdArgs {
     tree_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TreeExportArgs {
+    tree_id: String,
+    export_kind: String,
 }
 
 #[derive(Serialize)]
@@ -391,6 +529,18 @@ struct ImportFolderArgs {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct JsonImportArgs {
+    request: JsonImportRequest,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonImportRequest {
+    file_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SafCopyArgs {
     tree_uri: String,
     relative_path: String,
@@ -398,9 +548,265 @@ struct SafCopyArgs {
     mime_type: String,
 }
 
-#[derive(Serialize)]
-struct TempPathArgs {
-    path: String,
+fn class_color(class_id: i32) -> &'static str {
+    match class_id {
+        0 => "#3b82f6",
+        1 => "#ef4444",
+        2 => "#f59e0b",
+        3 => "#8b5cf6",
+        _ => "#94a3b8",
+    }
+}
+
+fn sides_are_adjacent(a: usize, b: usize, count: usize) -> bool {
+    count == 2 || a.abs_diff(b) == 1 || (count > 2 && a.abs_diff(b) == count - 1)
+}
+
+fn connected_bbox_endpoints(
+    tree: &TreeData,
+    side_index: usize,
+    bbox_id: &str,
+) -> HashSet<(usize, String)> {
+    let start = (side_index, bbox_id.to_string());
+    let mut found = HashSet::from([start.clone()]);
+    let mut queue = VecDeque::from([start]);
+    while let Some(endpoint) = queue.pop_front() {
+        for link in &tree.confirmed_links {
+            let left = (link.side_a, link.bbox_id_a.clone());
+            let right = (link.side_b, link.bbox_id_b.clone());
+            let next = if endpoint == left {
+                Some(right)
+            } else if endpoint == right {
+                Some(left)
+            } else {
+                None
+            };
+            if let Some(next) = next {
+                if found.insert(next.clone()) {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+    found
+}
+
+fn set_connected_bbox_class(
+    tree: &mut TreeData,
+    side_index: usize,
+    bbox_id: &str,
+    class_id: i32,
+) -> usize {
+    if !(0..=3).contains(&class_id) {
+        return 0;
+    }
+    let endpoints = connected_bbox_endpoints(tree, side_index, bbox_id);
+    let class_name = match class_id {
+        0 => "B1",
+        1 => "B2",
+        2 => "B3",
+        3 => "B4",
+        _ => unreachable!(),
+    };
+    let mut updated = 0;
+    for (side_index, bbox_id) in endpoints {
+        if let Some(bbox) = tree
+            .sides
+            .get_mut(side_index)
+            .and_then(|side| side.bboxes.iter_mut().find(|bbox| bbox.id == bbox_id))
+        {
+            bbox.class_id = class_id;
+            bbox.class_name = class_name.into();
+            updated += 1;
+        }
+    }
+    updated
+}
+
+fn delete_bbox(tree: &mut TreeData, side_index: usize, bbox_id: &str) -> bool {
+    let Some(side) = tree.sides.get_mut(side_index) else {
+        return false;
+    };
+    let before = side.bboxes.len();
+    side.bboxes.retain(|bbox| bbox.id != bbox_id);
+    if side.bboxes.len() == before {
+        return false;
+    }
+    tree.confirmed_links.retain(|link| {
+        !(link.side_a == side_index && link.bbox_id_a == bbox_id
+            || link.side_b == side_index && link.bbox_id_b == bbox_id)
+    });
+    true
+}
+
+fn add_confirmed_link(
+    tree: &mut TreeData,
+    side_a: usize,
+    bbox_id_a: String,
+    side_b: usize,
+    bbox_id_b: String,
+) -> Result<(), String> {
+    if !sides_are_adjacent(side_a, side_b, tree.sides.len()) {
+        return Err("Only adjacent sides can be linked.".into());
+    }
+    let left_exists = tree
+        .sides
+        .get(side_a)
+        .is_some_and(|side| side.bboxes.iter().any(|bbox| bbox.id == bbox_id_a));
+    let right_exists = tree
+        .sides
+        .get(side_b)
+        .is_some_and(|side| side.bboxes.iter().any(|bbox| bbox.id == bbox_id_b));
+    if !left_exists || !right_exists {
+        return Err("The selected box no longer exists.".into());
+    }
+    tree.confirmed_links.retain(|link| {
+        let same_pair = (link.side_a == side_a && link.side_b == side_b)
+            || (link.side_a == side_b && link.side_b == side_a);
+        let uses_endpoint = (link.side_a == side_a && link.bbox_id_a == bbox_id_a)
+            || (link.side_b == side_a && link.bbox_id_b == bbox_id_a)
+            || (link.side_a == side_b && link.bbox_id_a == bbox_id_b)
+            || (link.side_b == side_b && link.bbox_id_b == bbox_id_b);
+        !(same_pair && uses_endpoint)
+    });
+    let link_id = format!("lnk-{side_a}-{bbox_id_a}-{side_b}-{bbox_id_b}");
+    tree.confirmed_links.push(ConfirmedLinkData {
+        link_id,
+        side_a,
+        bbox_id_a,
+        side_b,
+        bbox_id_b,
+    });
+    Ok(())
+}
+
+fn handle_points(bbox: &BoxData) -> [(ResizeHandle, f64, f64); 8] {
+    let middle_x = (bbox.x1 + bbox.x2) / 2.0;
+    let middle_y = (bbox.y1 + bbox.y2) / 2.0;
+    [
+        (ResizeHandle::NorthWest, bbox.x1, bbox.y1),
+        (ResizeHandle::North, middle_x, bbox.y1),
+        (ResizeHandle::NorthEast, bbox.x2, bbox.y1),
+        (ResizeHandle::East, bbox.x2, middle_y),
+        (ResizeHandle::SouthEast, bbox.x2, bbox.y2),
+        (ResizeHandle::South, middle_x, bbox.y2),
+        (ResizeHandle::SouthWest, bbox.x1, bbox.y2),
+        (ResizeHandle::West, bbox.x1, middle_y),
+    ]
+}
+
+fn hit_resize_handle(bbox: &BoxData, x: f64, y: f64, tolerance: f64) -> Option<ResizeHandle> {
+    handle_points(bbox)
+        .into_iter()
+        .find(|(_, hx, hy)| (x - hx).hypot(y - hy) <= tolerance)
+        .map(|(handle, _, _)| handle)
+}
+
+fn hit_bbox(boxes: &[BoxData], x: f64, y: f64) -> Option<String> {
+    boxes
+        .iter()
+        .rev()
+        .find(|bbox| x >= bbox.x1 && x <= bbox.x2 && y >= bbox.y1 && y <= bbox.y2)
+        .map(|bbox| bbox.id.clone())
+}
+
+fn move_bbox(
+    bbox: &mut BoxData,
+    original: &BoxData,
+    delta_x: f64,
+    delta_y: f64,
+    width: f64,
+    height: f64,
+) {
+    let box_width = original.x2 - original.x1;
+    let box_height = original.y2 - original.y1;
+    bbox.x1 = (original.x1 + delta_x).clamp(0.0, (width - box_width).max(0.0));
+    bbox.y1 = (original.y1 + delta_y).clamp(0.0, (height - box_height).max(0.0));
+    bbox.x2 = bbox.x1 + box_width;
+    bbox.y2 = bbox.y1 + box_height;
+}
+
+fn resize_bbox(
+    bbox: &mut BoxData,
+    original: &BoxData,
+    handle: ResizeHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) {
+    const MIN_SIZE: f64 = 4.0;
+    let x = x.clamp(0.0, width);
+    let y = y.clamp(0.0, height);
+    let mut x1 = original.x1;
+    let mut y1 = original.y1;
+    let mut x2 = original.x2;
+    let mut y2 = original.y2;
+    if matches!(
+        handle,
+        ResizeHandle::NorthWest | ResizeHandle::West | ResizeHandle::SouthWest
+    ) {
+        x1 = x.min(x2 - MIN_SIZE);
+    }
+    if matches!(
+        handle,
+        ResizeHandle::NorthEast | ResizeHandle::East | ResizeHandle::SouthEast
+    ) {
+        x2 = x.max(x1 + MIN_SIZE);
+    }
+    if matches!(
+        handle,
+        ResizeHandle::NorthWest | ResizeHandle::North | ResizeHandle::NorthEast
+    ) {
+        y1 = y.min(y2 - MIN_SIZE);
+    }
+    if matches!(
+        handle,
+        ResizeHandle::SouthWest | ResizeHandle::South | ResizeHandle::SouthEast
+    ) {
+        y2 = y.max(y1 + MIN_SIZE);
+    }
+    bbox.x1 = x1.clamp(0.0, width);
+    bbox.y1 = y1.clamp(0.0, height);
+    bbox.x2 = x2.clamp(0.0, width);
+    bbox.y2 = y2.clamp(0.0, height);
+}
+
+fn clamp_viewport(mut viewport: CanvasViewport, width: f64, height: f64) -> CanvasViewport {
+    viewport.zoom = viewport.zoom.clamp(1.0, 6.0);
+    let max_x = width * (viewport.zoom - 1.0) / 2.0;
+    let max_y = height * (viewport.zoom - 1.0) / 2.0;
+    viewport.pan_x = viewport.pan_x.clamp(-max_x, max_x);
+    viewport.pan_y = viewport.pan_y.clamp(-max_y, max_y);
+    viewport
+}
+
+fn pointer_canvas_point(
+    event: &PointerEvent,
+    width: f64,
+    height: f64,
+    viewport: CanvasViewport,
+) -> Option<CanvasPoint> {
+    let raw = event.data().as_web_event();
+    let element = raw.current_target()?.dyn_into::<web_sys::Element>().ok()?;
+    let rect = element.get_bounding_client_rect();
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return None;
+    }
+    let base_x =
+        ((f64::from(raw.client_x()) - rect.left()) / rect.width() * width).clamp(0.0, width);
+    let base_y =
+        ((f64::from(raw.client_y()) - rect.top()) / rect.height() * height).clamp(0.0, height);
+    let center_x = width / 2.0;
+    let center_y = height / 2.0;
+    Some(CanvasPoint {
+        base_x,
+        base_y,
+        image_x: ((base_x - viewport.pan_x - center_x) / viewport.zoom + center_x)
+            .clamp(0.0, width),
+        image_y: ((base_y - viewport.pan_y - center_y) / viewport.zoom + center_y)
+            .clamp(0.0, height),
+    })
 }
 
 fn js_error(value: JsValue) -> String {
@@ -410,24 +816,57 @@ fn js_error(value: JsValue) -> String {
         .unwrap_or_else(|| "Native command failed.".into())
 }
 
+fn to_invoke_args<T>(value: &T) -> Result<JsValue, serde_wasm_bindgen::Error>
+where
+    T: Serialize + ?Sized,
+{
+    value.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+}
+
+fn confirm_action(message: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| window.confirm_with_message(message).ok())
+        .unwrap_or(false)
+}
+
 async fn load_bootstrap() -> Result<Bootstrap, String> {
     let value = invoke("bootstrap", JsValue::UNDEFINED)
         .await
         .map_err(js_error)?;
+    let mut bootstrap: Bootstrap =
+        serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())?;
+    if !bootstrap.settings.export_uri.is_empty()
+        && matches!(
+            validate_saf_folder(&bootstrap.settings.export_uri).await,
+            Ok(false)
+        )
+    {
+        bootstrap.settings = save_app_settings(AppSettings::default()).await?;
+    }
+    Ok(bootstrap)
+}
+
+async fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
+    let args = to_invoke_args(&SettingsArgs { settings }).map_err(|error| error.to_string())?;
+    let value = invoke("settings_save", args).await.map_err(js_error)?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
 
 async fn save_session(session: Session) -> Result<Session, String> {
-    let args = serde_wasm_bindgen::to_value(&SessionArgs { session })
-        .map_err(|error| error.to_string())?;
+    let args = to_invoke_args(&SessionArgs { session }).map_err(|error| error.to_string())?;
     let value = invoke("session_save", args).await.map_err(js_error)?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
 
 async fn delete_session(session_id: String) -> Result<Vec<Session>, String> {
-    let args = serde_wasm_bindgen::to_value(&SessionIdArgs { session_id })
-        .map_err(|error| error.to_string())?;
+    let args = to_invoke_args(&SessionIdArgs { session_id }).map_err(|error| error.to_string())?;
     let value = invoke("session_delete", args).await.map_err(js_error)?;
+    serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
+}
+
+async fn export_session(session_id: String) -> Result<ExportData, String> {
+    let args = to_invoke_args(&SessionIdArgs { session_id }).map_err(|error| error.to_string())?;
+    let value = invoke("session_export", args).await.map_err(js_error)?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
 
@@ -439,29 +878,96 @@ async fn list_sessions() -> Result<Vec<Session>, String> {
 }
 
 async fn delete_tree(tree_id: String) -> Result<(), String> {
-    let args =
-        serde_wasm_bindgen::to_value(&TreeIdArgs { tree_id }).map_err(|error| error.to_string())?;
+    let args = to_invoke_args(&TreeIdArgs { tree_id }).map_err(|error| error.to_string())?;
     invoke("tree_delete", args).await.map_err(js_error)?;
     Ok(())
 }
 
 async fn load_tree(tree_id: String) -> Result<TreeData, String> {
-    let args =
-        serde_wasm_bindgen::to_value(&TreeIdArgs { tree_id }).map_err(|error| error.to_string())?;
+    let args = to_invoke_args(&TreeIdArgs { tree_id }).map_err(|error| error.to_string())?;
     let value = invoke("tree_load", args).await.map_err(js_error)?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
 
 async fn save_tree(tree: TreeData) -> Result<TreeData, String> {
-    let args =
-        serde_wasm_bindgen::to_value(&TreeSaveArgs { tree }).map_err(|error| error.to_string())?;
+    let args = to_invoke_args(&TreeSaveArgs { tree }).map_err(|error| error.to_string())?;
     let value = invoke("tree_save", args).await.map_err(js_error)?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
 
+async fn mirror_sessions_index(data_root: &str, export_uri: &str) -> Result<(), String> {
+    if export_uri.trim().is_empty() {
+        return Ok(());
+    }
+    copy_to_saf(
+        export_uri,
+        "sessions.json",
+        &local_path(data_root, "sessions.json"),
+        "application/json",
+    )
+    .await
+}
+
+async fn mirror_tree_state(
+    tree: &TreeData,
+    data_root: &str,
+    export_uri: &str,
+) -> Result<(), String> {
+    if export_uri.trim().is_empty() {
+        return Ok(());
+    }
+    let mut files = vec![
+        ("sessions.json".to_string(), "application/json"),
+        (format!("trees/{}.json", tree.id), "application/json"),
+        (
+            format!("Output JSON/{}.json", tree.tree_name),
+            "application/json",
+        ),
+    ];
+    for side in &tree.sides {
+        files.push((
+            format!(
+                "Output TXT/{}/{}_{}.txt",
+                tree.split,
+                tree.tree_name,
+                side.side_index + 1
+            ),
+            "text/plain",
+        ));
+        files.push((
+            format!(
+                "dataset/annotlog/{}/{}_{}.json",
+                tree.split,
+                tree.tree_name,
+                side.side_index + 1
+            ),
+            "application/json",
+        ));
+    }
+    for (relative_path, mime_type) in files {
+        copy_to_saf(
+            export_uri,
+            &relative_path,
+            &local_path(data_root, &relative_path),
+            mime_type,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn save_tree_portable(
+    tree: TreeData,
+    data_root: &str,
+    export_uri: &str,
+) -> Result<(TreeData, Option<String>), String> {
+    let saved = save_tree(tree).await?;
+    let warning = mirror_tree_state(&saved, data_root, export_uri).await.err();
+    Ok((saved, warning))
+}
+
 async fn run_detector(image_path: String) -> Result<Vec<BoxData>, String> {
-    let args = serde_wasm_bindgen::to_value(&DetectorArgs { image_path })
-        .map_err(|error| error.to_string())?;
+    let args = to_invoke_args(&DetectorArgs { image_path }).map_err(|error| error.to_string())?;
     let value = invoke("detector_run", args).await.map_err(js_error)?;
     let response: DetectorData =
         serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())?;
@@ -469,21 +975,29 @@ async fn run_detector(image_path: String) -> Result<Vec<BoxData>, String> {
 }
 
 async fn compute_tree(tree_id: String) -> Result<ComputeData, String> {
-    let args =
-        serde_wasm_bindgen::to_value(&TreeIdArgs { tree_id }).map_err(|error| error.to_string())?;
+    let args = to_invoke_args(&TreeIdArgs { tree_id }).map_err(|error| error.to_string())?;
     let value = invoke("tree_compute", args).await.map_err(js_error)?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
 
+async fn export_tree(tree_id: String, export_kind: &str) -> Result<ExportData, String> {
+    let args = to_invoke_args(&TreeExportArgs {
+        tree_id,
+        export_kind: export_kind.into(),
+    })
+    .map_err(|error| error.to_string())?;
+    let value = invoke("tree_export", args).await.map_err(js_error)?;
+    serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
+}
+
 async fn suggest_tree_links(tree_id: String) -> Result<Vec<LinkSuggestionData>, String> {
-    let args =
-        serde_wasm_bindgen::to_value(&TreeIdArgs { tree_id }).map_err(|error| error.to_string())?;
+    let args = to_invoke_args(&TreeIdArgs { tree_id }).map_err(|error| error.to_string())?;
     let value = invoke("tree_suggest", args).await.map_err(js_error)?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
 
 async fn render_depth(tree_id: String, side_index: usize) -> Result<DepthRenderData, String> {
-    let args = serde_wasm_bindgen::to_value(&DepthRenderArgs {
+    let args = to_invoke_args(&DepthRenderArgs {
         tree_id,
         side_index,
     })
@@ -501,10 +1015,11 @@ async fn copy_to_saf(
     // Plugin commands take a single `payload` parameter, so the invoke args must
     // be wrapped under "payload" (otherwise Tauri reports "missing required key
     // payload" and the SAF mirror silently fails).
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let relative_path = format!("PalmAnnotate/{}", relative_path.trim_start_matches('/'));
+    let args = to_invoke_args(&serde_json::json!({
         "payload": SafCopyArgs {
             tree_uri: tree_uri.into(),
-            relative_path: relative_path.into(),
+            relative_path,
             source_path: source_path.into(),
             mime_type: mime_type.into(),
         }
@@ -517,11 +1032,36 @@ async fn copy_to_saf(
 }
 
 async fn delete_from_saf(tree_uri: &str, relative_path: &str) -> Result<(), String> {
-    let args = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let relative_path = format!("PalmAnnotate/{}", relative_path.trim_start_matches('/'));
+    let args = to_invoke_args(&serde_json::json!({
         "payload": { "treeUri": tree_uri, "relativePath": relative_path }
     }))
     .map_err(|error| error.to_string())?;
     invoke("plugin:palm-native|saf_delete", args)
+        .await
+        .map_err(js_error)?;
+    Ok(())
+}
+
+async fn validate_saf_folder(tree_uri: &str) -> Result<bool, String> {
+    let args = to_invoke_args(&serde_json::json!({
+        "payload": { "treeUri": tree_uri }
+    }))
+    .map_err(|error| error.to_string())?;
+    let value = invoke("plugin:palm-native|saf_validate", args)
+        .await
+        .map_err(js_error)?;
+    let validation: SafValidation =
+        serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())?;
+    Ok(validation.valid)
+}
+
+async fn release_saf_folder(tree_uri: &str) -> Result<(), String> {
+    let args = to_invoke_args(&serde_json::json!({
+        "payload": { "treeUri": tree_uri }
+    }))
+    .map_err(|error| error.to_string())?;
+    invoke("plugin:palm-native|saf_release_folder", args)
         .await
         .map_err(js_error)?;
     Ok(())
@@ -535,6 +1075,49 @@ fn local_path(root: &str, relative: &str) -> String {
     )
 }
 
+fn tree_artifact_paths(tree: &TreeSummary) -> Vec<String> {
+    let mut paths = vec![
+        format!("trees/{}.json", tree.id),
+        format!("Output JSON/{}.json", tree.tree_name),
+        format!("dataset/metadata/{}.json", tree.tree_name),
+        format!("exports/{}_result.csv", tree.tree_name),
+        format!("exports/{}_session.json", tree.tree_name),
+        format!("exports/{}_identity.json", tree.tree_name),
+    ];
+    for side in 1..=tree.side_count.max(1) {
+        paths.push(format!("Output TXT/{}_{}.txt", tree.tree_name, side));
+        paths.push(format!("exports/{}_{}.txt", tree.tree_name, side));
+        paths.push(format!("exports/{}_{}_mismatch.txt", tree.tree_name, side));
+        for split in ["field", "train", "val", "test"] {
+            for extension in ["jpg", "jpeg", "png"] {
+                paths.push(format!(
+                    "dataset/images/{split}/{}_{}.{}",
+                    tree.tree_name, side, extension
+                ));
+            }
+            for extension in ["raw", "bin", "png", "json"] {
+                paths.push(format!(
+                    "dataset/depth/{split}/{}_{}.{}",
+                    tree.tree_name, side, extension
+                ));
+            }
+            paths.push(format!(
+                "dataset/labels/{split}/{}_{}.txt",
+                tree.tree_name, side
+            ));
+            paths.push(format!(
+                "dataset/annotlog/{split}/{}_{}.json",
+                tree.tree_name, side
+            ));
+            paths.push(format!(
+                "Output TXT/{split}/{}_{}.txt",
+                tree.tree_name, side
+            ));
+        }
+    }
+    paths
+}
+
 async fn delete_temporary_frames(frames: Vec<CapturedFrame>) {
     for frame in frames {
         for path in [
@@ -545,9 +1128,7 @@ async fn delete_temporary_frames(frames: Vec<CapturedFrame>) {
         .into_iter()
         .flatten()
         {
-            if let Ok(args) =
-                serde_wasm_bindgen::to_value(&serde_json::json!({ "payload": { "path": path } }))
-            {
+            if let Ok(args) = to_invoke_args(&serde_json::json!({ "payload": { "path": path } })) {
                 let _ = invoke("plugin:palm-native|temp_delete", args).await;
             }
         }
@@ -555,7 +1136,7 @@ async fn delete_temporary_frames(frames: Vec<CapturedFrame>) {
 }
 
 async fn optional_gps() -> Option<GpsData> {
-    let permission_args = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let permission_args = to_invoke_args(&serde_json::json!({
         "permissions": ["location"]
     }))
     .ok()?;
@@ -566,7 +1147,7 @@ async fn optional_gps() -> Option<GpsData> {
     if permission.location != "granted" {
         return None;
     }
-    let position_args = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let position_args = to_invoke_args(&serde_json::json!({
         "options": {
             "enableHighAccuracy": true,
             "timeout": 15000,
@@ -588,7 +1169,7 @@ async fn optional_gps() -> Option<GpsData> {
 async fn pick_saf_folder() -> Result<Option<SafFolder>, String> {
     let value = invoke(
         "plugin:palm-native|saf_pick_folder",
-        serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|error| error.to_string())?,
+        to_invoke_args(&serde_json::json!({})).map_err(|error| error.to_string())?,
     )
     .await
     .map_err(js_error)?;
@@ -603,11 +1184,17 @@ async fn pick_saf_folder() -> Result<Option<SafFolder>, String> {
     }
 }
 
-async fn import_saf_folder() -> Result<Option<Vec<Session>>, String> {
+async fn import_saf_folder() -> Result<Option<(Vec<Session>, AppSettings)>, String> {
     let Some(folder) = pick_saf_folder().await? else {
         return Ok(None);
     };
-    let tree_args = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let settings = save_app_settings(AppSettings {
+        export_uri: folder.uri.clone(),
+        export_name: folder.name,
+        ..AppSettings::default()
+    })
+    .await?;
+    let tree_args = to_invoke_args(&serde_json::json!({
         "payload": { "treeUri": folder.uri.clone() }
     }))
     .map_err(|error| error.to_string())?;
@@ -616,7 +1203,7 @@ async fn import_saf_folder() -> Result<Option<Vec<Session>>, String> {
         .map_err(js_error)?;
     let staged: NativePath =
         serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())?;
-    let args = serde_wasm_bindgen::to_value(&ImportFolderArgs {
+    let args = to_invoke_args(&ImportFolderArgs {
         folder_path: staged.path,
         export_uri: folder.uri,
     })
@@ -624,6 +1211,38 @@ async fn import_saf_folder() -> Result<Option<Vec<Session>>, String> {
     let value = invoke("sessions_import_folder", args)
         .await
         .map_err(js_error)?;
+    let sessions = serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())?;
+    Ok(Some((sessions, settings)))
+}
+
+async fn import_json_file() -> Result<Option<JsonImportData>, String> {
+    let value = invoke(
+        "plugin:palm-native|saf_pick_json",
+        to_invoke_args(&serde_json::json!({})).map_err(|error| error.to_string())?,
+    )
+    .await
+    .map_err(js_error)?;
+    let picked: PickedFile =
+        serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())?;
+    if picked.cancelled {
+        return Ok(None);
+    }
+    if picked.path.is_empty() {
+        return Err("Android did not return the selected JSON file.".into());
+    }
+    let args = to_invoke_args(&JsonImportArgs {
+        request: JsonImportRequest {
+            file_path: picked.path.clone(),
+        },
+    })
+    .map_err(|error| error.to_string())?;
+    let result = invoke("tree_import_json", args).await.map_err(js_error);
+    if let Ok(temp_args) =
+        to_invoke_args(&serde_json::json!({ "payload": { "path": picked.path } }))
+    {
+        let _ = invoke("plugin:palm-native|temp_delete", temp_args).await;
+    }
+    let value = result?;
     serde_wasm_bindgen::from_value(value)
         .map(Some)
         .map_err(|error| error.to_string())
@@ -633,8 +1252,7 @@ async fn native_empty<T>(command: &str) -> Result<T, String>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let args =
-        serde_wasm_bindgen::to_value(&serde_json::json!({})).map_err(|error| error.to_string())?;
+    let args = to_invoke_args(&serde_json::json!({})).map_err(|error| error.to_string())?;
     let value = invoke(command, args).await.map_err(js_error)?;
     serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())
 }
@@ -758,8 +1376,7 @@ async fn commit_capture(
         },
         "temporaryFiles": temporary_files
     });
-    let args = serde_wasm_bindgen::to_value(&CaptureCommitArgs { request })
-        .map_err(|error| error.to_string())?;
+    let args = to_invoke_args(&CaptureCommitArgs { request }).map_err(|error| error.to_string())?;
     let value = invoke("capture_commit", args).await.map_err(js_error)?;
     let tree: TreeData =
         serde_wasm_bindgen::from_value(value).map_err(|error| error.to_string())?;
@@ -788,7 +1405,12 @@ async fn commit_capture(
             ));
         }
         files.push((
-            format!("Output TXT/{}_{}.txt", tree.tree_name, side.side_index + 1),
+            format!(
+                "Output TXT/{}/{}_{}.txt",
+                tree.split,
+                tree.tree_name,
+                side.side_index + 1
+            ),
             "text/plain".into(),
         ));
     }
@@ -822,6 +1444,7 @@ pub fn App() -> Element {
     let mut selected_session = use_signal(|| None::<Session>);
     let mut selected_tree_id = use_signal(|| None::<String>);
     let mut pending_capture = use_signal(|| None::<PendingCapture>);
+    let mut retake_side = use_signal(|| None::<usize>);
 
     use_effect(move || {
         spawn(async move {
@@ -833,36 +1456,113 @@ pub fn App() -> Element {
         });
     });
 
+    // Android hardware/gesture back: the native MainActivity calls window.__paBack()
+    // and only finishes the activity when this returns "exit" (i.e. already Home).
+    // Without it the default WebView behaviour closes the whole app on every back.
+    let mut back_handler = use_signal(|| None::<Closure<dyn FnMut() -> JsValue>>);
+    use_effect(move || {
+        let closure = Closure::<dyn FnMut() -> JsValue>::new(move || -> JsValue {
+            let current = *page.read();
+            match current {
+                Page::Home => return JsValue::from_str("exit"),
+                Page::NewSession | Page::Settings => {
+                    page.set(Page::Home);
+                }
+                Page::SessionDetail => {
+                    selected_session.set(None);
+                    selected_tree_id.set(None);
+                    page.set(Page::Home);
+                }
+                Page::Capture | Page::Review => {
+                    pending_capture.set(None);
+                    retake_side.set(None);
+                    if selected_session.read().is_some() {
+                        page.set(Page::SessionDetail);
+                    } else {
+                        page.set(Page::Home);
+                    }
+                }
+                Page::Annotate | Page::Dedup | Page::Results | Page::DepthViewer => {
+                    selected_tree_id.set(None);
+                    page.set(Page::SessionDetail);
+                }
+            }
+            JsValue::from_str("back")
+        });
+        if let Some(window) = web_sys::window() {
+            let _ = js_sys::Reflect::set(
+                window.as_ref(),
+                &JsValue::from_str("__paBack"),
+                closure.as_ref(),
+            );
+        }
+        back_handler.set(Some(closure));
+    });
+
     rsx! {
         document::Stylesheet { href: STYLES }
-        div { class: "app-shell",
-            Sidebar { page, on_navigate: move |next| page.set(next) }
-            main { class: "workspace",
-                if *page.read() != Page::Home {
-                    Header { page, bootstrap: bootstrap.read().clone() }
+        main { class: "app",
+            if matches!(*page.read(), Page::Annotate | Page::Dedup | Page::Results | Page::DepthViewer) {
+                EditorNav {
+                    page,
+                    tree_name: selected_session.read().as_ref()
+                        .and_then(|session| selected_tree_id.read().as_ref()
+                            .and_then(|id| session.trees.iter().find(|tree| &tree.id == id)))
+                        .map(|tree| tree.tree_name.clone())
+                        .unwrap_or_default(),
+                    on_home: move |_| {
+                        selected_tree_id.set(None);
+                        page.set(Page::SessionDetail);
+                    },
+                    on_navigate: move |next| page.set(next)
                 }
-                section { class: "page-stage",
-                    if let Some(message) = notice.read().as_ref() {
-                        div { class: "inline-error", "{message}" }
-                    }
-                    if *loading.read() {
-                        LoadingState {}
-                    } else if let Some(message) = error.read().as_ref() {
-                        ErrorState { message: message.clone() }
-                    } else {
-                        match *page.read() {
-                            Page::Home => rsx! {
-                                Home {
-                                    sessions: bootstrap.read().as_ref().map(|b| b.sessions.clone()).unwrap_or_default(),
-                                    on_new: move |_| page.set(Page::NewSession),
-                                    on_import: move |_| {
+            }
+            section { class: "page-stage",
+                if let Some(message) = notice.read().as_ref() {
+                    div { class: "inline-error", "{message}" }
+                }
+                if *loading.read() {
+                    LoadingState {}
+                } else if let Some(message) = error.read().as_ref() {
+                    ErrorState { message: message.clone() }
+                } else {
+                    match *page.read() {
+                        Page::Home => rsx! {
+                            Home {
+                                sessions: bootstrap.read().as_ref().map(|b| b.sessions.clone()).unwrap_or_default(),
+                                settings: bootstrap.read().as_ref().map(|b| b.settings.clone()).unwrap_or_default(),
+                                on_new: move |_| {
+                                    let has_folder = bootstrap.read().as_ref()
+                                        .is_some_and(|value| !value.settings.export_uri.is_empty());
+                                    if has_folder {
+                                        page.set(Page::NewSession);
+                                    } else {
                                         loading.set(true);
                                         notice.set(None);
+                                        let data_root = bootstrap.read().as_ref()
+                                            .map(|value| value.data_root.clone())
+                                            .unwrap_or_default();
                                         spawn(async move {
-                                            match import_saf_folder().await {
-                                                Ok(Some(sessions)) => {
-                                                    if let Some(value) = bootstrap.write().as_mut() {
-                                                        value.sessions = sessions;
+                                            match pick_saf_folder().await {
+                                                Ok(Some(folder)) => {
+                                                    match save_app_settings(AppSettings {
+                                                        export_uri: folder.uri,
+                                                        export_name: folder.name,
+                                                        ..AppSettings::default()
+                                                    }).await {
+                                                        Ok(settings) => {
+                                                            if let Err(message) = mirror_sessions_index(
+                                                                &data_root,
+                                                                &settings.export_uri,
+                                                            ).await {
+                                                                notice.set(Some(format!("Folder selected: {message}")));
+                                                            }
+                                                            if let Some(value) = bootstrap.write().as_mut() {
+                                                                value.settings = settings;
+                                                            }
+                                                            page.set(Page::NewSession);
+                                                        }
+                                                        Err(message) => notice.set(Some(message)),
                                                     }
                                                 }
                                                 Ok(None) => {}
@@ -870,101 +1570,282 @@ pub fn App() -> Element {
                                             }
                                             loading.set(false);
                                         });
-                                    },
-                                    on_open: move |session: Session| {
-                                        selected_session.set(Some(session));
-                                        page.set(Page::SessionDetail);
                                     }
-                                }
-                            },
-                            Page::NewSession => rsx! {
-                                NewSession {
-                                    data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
-                                    on_cancel: move |_| page.set(Page::Home),
-                                    on_warning: move |message: String| notice.set(Some(message)),
-                                    on_saved: move |session: Session| {
-                                        if let Some(value) = bootstrap.write().as_mut() {
-                                            value.sessions.push(session.clone());
+                                },
+                                on_choose_folder: move |_| {
+                                    loading.set(true);
+                                    notice.set(None);
+                                    let data_root = bootstrap.read().as_ref()
+                                        .map(|value| value.data_root.clone())
+                                        .unwrap_or_default();
+                                    spawn(async move {
+                                        match pick_saf_folder().await {
+                                            Ok(Some(folder)) => {
+                                                match save_app_settings(AppSettings {
+                                                    export_uri: folder.uri,
+                                                    export_name: folder.name,
+                                                    ..AppSettings::default()
+                                                }).await {
+                                                    Ok(settings) => {
+                                                        if let Err(message) = mirror_sessions_index(
+                                                            &data_root,
+                                                            &settings.export_uri,
+                                                        ).await {
+                                                            notice.set(Some(format!("Folder selected: {message}")));
+                                                        }
+                                                        let sessions = list_sessions().await.ok();
+                                                        if let Some(value) = bootstrap.write().as_mut() {
+                                                            value.settings = settings;
+                                                            if let Some(sessions) = sessions {
+                                                                value.sessions = sessions;
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(message) => notice.set(Some(message)),
+                                                }
+                                            }
+                                            Ok(None) => {}
+                                            Err(message) => notice.set(Some(message)),
                                         }
-                                        selected_session.set(Some(session));
-                                        page.set(Page::SessionDetail);
+                                        loading.set(false);
+                                    });
+                                },
+                                on_import: move |_| {
+                                    loading.set(true);
+                                    notice.set(None);
+                                    let data_root = bootstrap.read().as_ref()
+                                        .map(|value| value.data_root.clone())
+                                        .unwrap_or_default();
+                                    spawn(async move {
+                                        match import_saf_folder().await {
+                                            Ok(Some((sessions, settings))) => {
+                                                if let Err(message) = mirror_sessions_index(
+                                                    &data_root,
+                                                    &settings.export_uri,
+                                                ).await {
+                                                    notice.set(Some(format!("Imported locally: {message}")));
+                                                }
+                                                if let Some(value) = bootstrap.write().as_mut() {
+                                                    value.sessions = sessions;
+                                                    value.settings = settings;
+                                                }
+                                            }
+                                            Ok(None) => {}
+                                            Err(message) => notice.set(Some(message)),
+                                        }
+                                        loading.set(false);
+                                    });
+                                },
+                                on_import_json: move |_| {
+                                    loading.set(true);
+                                    notice.set(None);
+                                    spawn(async move {
+                                        match import_json_file().await {
+                                            Ok(Some(imported)) => {
+                                                match list_sessions().await {
+                                                    Ok(sessions) => {
+                                                        selected_session.set(
+                                                            sessions.iter()
+                                                                .find(|session| session.id == imported.session_id)
+                                                                .cloned()
+                                                        );
+                                                        selected_tree_id.set(Some(imported.tree_id));
+                                                        if let Some(value) = bootstrap.write().as_mut() {
+                                                            value.sessions = sessions;
+                                                        }
+                                                        page.set(Page::Annotate);
+                                                    }
+                                                    Err(message) => notice.set(Some(message)),
+                                                }
+                                            }
+                                            Ok(None) => {}
+                                            Err(message) => notice.set(Some(message)),
+                                        }
+                                        loading.set(false);
+                                    });
+                                },
+                                on_settings: move |_| page.set(Page::Settings),
+                                on_open: move |session: Session| {
+                                    selected_session.set(Some(session));
+                                    selected_tree_id.set(None);
+                                    page.set(Page::SessionDetail);
+                                }
+                            }
+                        },
+                        Page::NewSession => rsx! {
+                            NewSession {
+                                data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
+                                export_uri: bootstrap.read().as_ref().map(|b| b.settings.export_uri.clone()).unwrap_or_default(),
+                                recent_varieties: bootstrap.read().as_ref().map(|b| b.settings.recent_varieties.clone()).unwrap_or_default(),
+                                recent_blocks: bootstrap.read().as_ref().map(|b| b.settings.recent_blocks.clone()).unwrap_or_default(),
+                                on_cancel: move |_| page.set(Page::Home),
+                                on_warning: move |message: String| notice.set(Some(message)),
+                                on_saved: move |session: Session| {
+                                    if let Some(value) = bootstrap.write().as_mut() {
+                                        value.sessions.push(session.clone());
                                     }
+                                    selected_session.set(Some(session));
+                                    page.set(Page::SessionDetail);
                                 }
-                            },
-                            Page::SessionDetail => rsx! {
-                                SessionDetail {
-                                    session: selected_session.read().clone(),
-                                    data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
-                                    on_capture: move |_| page.set(Page::Capture),
-                                    on_warning: move |message: String| notice.set(Some(message)),
-                                    on_sessions_updated: move |sessions: Vec<Session>| {
-                                        let selected_id = selected_session.read().as_ref().map(|s| s.id.clone());
-                                        selected_session.set(selected_id.and_then(|id| sessions.iter().find(|s| s.id == id).cloned()));
-                                        if let Some(value) = bootstrap.write().as_mut() {
-                                            value.sessions = sessions;
-                                        }
-                                    },
-                                    on_deleted: move |sessions: Vec<Session>| {
-                                        if let Some(value) = bootstrap.write().as_mut() {
-                                            value.sessions = sessions;
-                                        }
-                                        selected_session.set(None);
-                                        page.set(Page::Home);
+                            }
+                        },
+                        Page::SessionDetail => rsx! {
+                            SessionDetail {
+                                session: selected_session.read().clone(),
+                                data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
+                                export_uri: bootstrap.read().as_ref().map(|b| b.settings.export_uri.clone()).unwrap_or_default(),
+                                on_home: move |_| {
+                                    selected_session.set(None);
+                                    selected_tree_id.set(None);
+                                    page.set(Page::Home);
+                                },
+                                on_capture: move |_| {
+                                    pending_capture.set(None);
+                                    retake_side.set(None);
+                                    page.set(Page::Capture);
+                                },
+                                on_open_tree: move |tree_id: String| {
+                                    selected_tree_id.set(Some(tree_id));
+                                    page.set(Page::Annotate);
+                                },
+                                on_warning: move |message: String| notice.set(Some(message)),
+                                on_sessions_updated: move |sessions: Vec<Session>| {
+                                    let selected_id = selected_session.read().as_ref().map(|s| s.id.clone());
+                                    selected_session.set(selected_id.and_then(|id| sessions.iter().find(|s| s.id == id).cloned()));
+                                    if let Some(value) = bootstrap.write().as_mut() {
+                                        value.sessions = sessions;
                                     }
+                                },
+                                on_deleted: move |sessions: Vec<Session>| {
+                                    if let Some(value) = bootstrap.write().as_mut() {
+                                        value.sessions = sessions;
+                                    }
+                                    selected_session.set(None);
+                                    selected_tree_id.set(None);
+                                    page.set(Page::Home);
                                 }
-                            },
-                            Page::Capture => rsx! {
-                                Capture {
-                                    session: selected_session.read().clone(),
-                                    on_cancel: move |_| page.set(Page::SessionDetail),
-                                    on_complete: move |capture: PendingCapture| {
-                                        pending_capture.set(Some(capture));
+                            }
+                        },
+                        Page::Capture => rsx! {
+                            Capture {
+                                session: selected_session.read().clone(),
+                                existing: pending_capture.read().clone(),
+                                retake_side: *retake_side.read(),
+                                on_cancel: move |_| {
+                                    if pending_capture.read().is_some() && retake_side.read().is_some() {
+                                        retake_side.set(None);
                                         page.set(Page::Review);
-                                    }
-                                }
-                            },
-                            Page::Review => rsx! {
-                                Review {
-                                    capture: pending_capture.read().clone(),
-                                    data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
-                                    on_retake: move |_| page.set(Page::Capture),
-                                    on_cancel: move |_| {
+                                    } else {
                                         pending_capture.set(None);
+                                        retake_side.set(None);
                                         page.set(Page::SessionDetail);
-                                    },
-                                    on_committed: move |outcome: CommitOutcome| {
-                                        selected_tree_id.set(Some(outcome.tree_id));
-                                        notice.set(outcome.mirror_warning);
-                                        pending_capture.set(None);
-                                        page.set(Page::Annotate);
+                                    }
+                                },
+                                on_complete: move |capture: PendingCapture| {
+                                    pending_capture.set(Some(capture));
+                                    retake_side.set(None);
+                                    page.set(Page::Review);
+                                }
+                            }
+                        },
+                        Page::Review => rsx! {
+                            Review {
+                                capture: pending_capture.read().clone(),
+                                data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
+                                on_retake: move |side_index: usize| {
+                                    retake_side.set(Some(side_index));
+                                    page.set(Page::Capture);
+                                },
+                                on_retake_all: move |_| {
+                                    pending_capture.set(None);
+                                    retake_side.set(None);
+                                    page.set(Page::Capture);
+                                },
+                                on_cancel: move |_| {
+                                    pending_capture.set(None);
+                                    retake_side.set(None);
+                                    page.set(Page::SessionDetail);
+                                },
+                                on_committed: move |outcome: CommitOutcome| {
+                                    selected_tree_id.set(Some(outcome.tree_id));
+                                    notice.set(outcome.mirror_warning);
+                                    pending_capture.set(None);
+                                    spawn(async move {
+                                        if let Ok(sessions) = list_sessions().await {
+                                            let selected_id = selected_session.read().as_ref().map(|s| s.id.clone());
+                                            selected_session.set(selected_id.and_then(|id| sessions.iter().find(|s| s.id == id).cloned()));
+                                            if let Some(value) = bootstrap.write().as_mut() {
+                                                value.sessions = sessions;
+                                            }
+                                        }
+                                    });
+                                    page.set(Page::Annotate);
+                                }
+                            }
+                        },
+                        Page::Annotate => rsx! {
+                            Annotate {
+                                tree_id: selected_tree_id.read().clone(),
+                                data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
+                                export_uri: bootstrap.read().as_ref().map(|b| b.settings.export_uri.clone()).unwrap_or_default(),
+                                on_next: move |_| page.set(Page::Dedup),
+                                on_exit: move |_| {
+                                    spawn(async move {
+                                        if let Ok(sessions) = list_sessions().await {
+                                            let selected_id = selected_session.read().as_ref().map(|s| s.id.clone());
+                                            selected_session.set(selected_id.and_then(|id| sessions.iter().find(|s| s.id == id).cloned()));
+                                            if let Some(value) = bootstrap.write().as_mut() {
+                                                value.sessions = sessions;
+                                            }
+                                        }
+                                    });
+                                    page.set(Page::SessionDetail);
+                                },
+                                on_next_tree: move |_| {
+                                    spawn(async move {
+                                        if let Ok(sessions) = list_sessions().await {
+                                            let selected_id = selected_session.read().as_ref().map(|s| s.id.clone());
+                                            selected_session.set(selected_id.and_then(|id| sessions.iter().find(|s| s.id == id).cloned()));
+                                            if let Some(value) = bootstrap.write().as_mut() {
+                                                value.sessions = sessions;
+                                            }
+                                        }
+                                    });
+                                    selected_tree_id.set(None);
+                                    page.set(Page::Capture);
+                                }
+                            }
+                        },
+                        Page::Dedup => rsx! {
+                            Dedup {
+                                tree_id: selected_tree_id.read().clone(),
+                                data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
+                                export_uri: bootstrap.read().as_ref().map(|b| b.settings.export_uri.clone()).unwrap_or_default(),
+                                on_results: move |_| page.set(Page::Results)
+                            }
+                        },
+                        Page::Results => rsx! {
+                            Results {
+                                tree_id: selected_tree_id.read().clone(),
+                                data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
+                                export_uri: bootstrap.read().as_ref().map(|b| b.settings.export_uri.clone()).unwrap_or_default()
+                            }
+                        },
+                        Page::DepthViewer => rsx! {
+                            DepthViewer { tree_id: selected_tree_id.read().clone() }
+                        },
+                        Page::Settings => rsx! {
+                            Settings {
+                                settings: bootstrap.read().as_ref().map(|b| b.settings.clone()).unwrap_or_default(),
+                                data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
+                                on_back: move |_| page.set(Page::Home),
+                                on_saved: move |settings: AppSettings| {
+                                    if let Some(value) = bootstrap.write().as_mut() {
+                                        value.settings = settings;
                                     }
                                 }
-                            },
-                            Page::Annotate => rsx! {
-                                Annotate {
-                                    tree_id: selected_tree_id.read().clone(),
-                                    data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default(),
-                                    on_next: move |_| page.set(Page::Dedup)
-                                }
-                            },
-                            Page::Dedup => rsx! {
-                                Dedup {
-                                    tree_id: selected_tree_id.read().clone(),
-                                    on_results: move |_| page.set(Page::Results)
-                                }
-                            },
-                            Page::Results => rsx! {
-                                Results { tree_id: selected_tree_id.read().clone() }
-                            },
-                            Page::DepthViewer => rsx! {
-                                DepthViewer { tree_id: selected_tree_id.read().clone() }
-                            },
-                            Page::Settings => rsx! {
-                                Settings {
-                                    data_root: bootstrap.read().as_ref().map(|b| b.data_root.clone()).unwrap_or_default()
-                                }
-                            },
-                        }
+                            }
+                        },
                     }
                 }
             }
@@ -973,79 +1854,33 @@ pub fn App() -> Element {
 }
 
 #[component]
-fn Sidebar(page: Signal<Page>, on_navigate: EventHandler<Page>) -> Element {
-    let primary = [
-        (Page::Home, "Sessions", "grid"),
-        (Page::Capture, "Capture", "camera"),
-        (Page::Review, "Review", "review"),
-        (Page::Annotate, "Annotate", "box"),
-        (Page::Dedup, "Dedup", "link"),
-        (Page::Results, "Results", "chart"),
+fn EditorNav(
+    page: Signal<Page>,
+    tree_name: String,
+    on_home: EventHandler<MouseEvent>,
+    on_navigate: EventHandler<Page>,
+) -> Element {
+    let tools = [
+        (Page::Annotate, "Annotate"),
+        (Page::Dedup, "Dedup"),
+        (Page::Results, "Results"),
+        (Page::DepthViewer, "Depth"),
     ];
     rsx! {
-        aside { class: "sidebar",
-            div { class: "brand",
-                div { class: "brand-mark", "PA" }
-                div { class: "brand-copy",
-                    strong { "PalmAnnotate" }
-                    span { "Field workspace" }
-                }
+        header { class: "editor-nav",
+            button { class: "icon-button", onclick: on_home, aria_label: "Back to session",
+                Icon { name: "back" }
             }
-            nav { class: "nav-list", aria_label: "Primary",
-                for (target, label, icon) in primary {
+            strong { class: "editor-tree", "{tree_name}" }
+            nav { class: "editor-tools", aria_label: "Tree tools",
+                for (target, label) in tools {
                     button {
-                        class: if *page.read() == target { "nav-item active" } else { "nav-item" },
+                        class: if *page.read() == target { "tool-tab active" } else { "tool-tab" },
                         onclick: move |_| on_navigate.call(target),
-                        Icon { name: icon }
-                        span { "{label}" }
+                        "{label}"
                     }
                 }
             }
-            div { class: "sidebar-bottom",
-                button {
-                    class: if *page.read() == Page::DepthViewer { "nav-item active" } else { "nav-item" },
-                    onclick: move |_| on_navigate.call(Page::DepthViewer),
-                    Icon { name: "depth" }
-                    span { "Depth" }
-                }
-                button {
-                    class: if *page.read() == Page::Settings { "nav-item active" } else { "nav-item" },
-                    onclick: move |_| on_navigate.call(Page::Settings),
-                    Icon { name: "settings" }
-                    span { "Settings" }
-                }
-                div { class: "sync-state",
-                    span { class: "status-dot" }
-                    div { strong { "Offline ready" } span { "Primary data local" } }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn Header(page: Signal<Page>, bootstrap: Option<Bootstrap>) -> Element {
-    rsx! {
-        header { class: "topbar",
-            div {
-                p { class: "eyebrow", "PALMANNOTATE / FIELD" }
-                h1 { "{page.read().title()}" }
-            }
-            div { class: "device-strip",
-                DeviceState { label: "Camera", state: "Ready", active: true }
-                DeviceState { label: "Orbbec", state: "Not attached", active: false }
-                div { class: "schema-pill", "Schema v{bootstrap.as_ref().map(|b| b.schema_version).unwrap_or(4)}" }
-            }
-        }
-    }
-}
-
-#[component]
-fn DeviceState(label: &'static str, state: &'static str, active: bool) -> Element {
-    rsx! {
-        div { class: "device-state",
-            span { class: if active { "status-dot" } else { "status-dot muted" } }
-            div { span { "{label}" } strong { "{state}" } }
         }
     }
 }
@@ -1053,14 +1888,28 @@ fn DeviceState(label: &'static str, state: &'static str, active: bool) -> Elemen
 #[component]
 fn Home(
     sessions: Vec<Session>,
+    settings: AppSettings,
     on_new: EventHandler<MouseEvent>,
+    on_choose_folder: EventHandler<MouseEvent>,
     on_import: EventHandler<MouseEvent>,
+    on_import_json: EventHandler<MouseEvent>,
+    on_settings: EventHandler<MouseEvent>,
     on_open: EventHandler<Session>,
 ) -> Element {
     let total_trees: usize = sessions.iter().map(|session| session.trees.len()).sum();
     let mut groups: Vec<String> = sessions
         .iter()
-        .map(|session| format!("{}|{}", session.variety, session.block))
+        .map(|session| {
+            if session.group_key.is_empty() {
+                format!(
+                    "{}__{}",
+                    normalized_segment(&session.variety),
+                    normalized_block(&session.block)
+                )
+            } else {
+                session.group_key.clone()
+            }
+        })
         .collect();
     groups.sort_unstable();
     groups.dedup();
@@ -1069,26 +1918,35 @@ fn Home(
         div { class: "home",
             header { class: "home-head",
                 h1 { "PalmAnnotate" }
-                p { "Fresh fruit bunch documentation — work session by session" }
+                button { class: "icon-button", onclick: on_settings, aria_label: "Settings",
+                    Icon { name: "settings" }
+                }
             }
             div { class: "stat-cards",
                 div { class: "stat-card",
                     strong { class: "stat-trees", "{total_trees}" }
-                    span { "TOTAL TREES" }
+                    span { "TREES" }
                 }
                 div { class: "stat-card",
                     strong { class: "stat-groups", "{total_groups}" }
-                    span { "TOTAL GROUPS" }
+                    span { "GROUPS" }
                 }
             }
             button { class: "button primary block", onclick: on_new,
                 Icon { name: "plus" } "New Session"
             }
-            p { class: "section-label", "RECENT SESSIONS" }
-            if sessions.is_empty() {
-                div { class: "empty-simple",
-                    "No sessions yet. Choose an export folder, then create one."
+            div { class: "folder-row",
+                div {
+                    Icon { name: "folder" }
+                    strong {
+                        if settings.export_name.is_empty() { "Choose folder" } else { "{settings.export_name}" }
+                    }
                 }
+                button { class: "button secondary compact", onclick: on_choose_folder, "Change" }
+            }
+            p { class: "section-label", "SESSIONS" }
+            if sessions.is_empty() {
+                div { class: "empty-simple", "No sessions" }
             } else {
                 div { class: "session-list",
                     for session in sessions {
@@ -1099,7 +1957,7 @@ fn Home(
                                 move |_| on_open.call(session.clone())
                             },
                             div { class: "session-main",
-                                strong { "{session.variety} · {session.block}" }
+                                strong { "{session.variety} / {session.block}" }
                                 span { "{session.trees.len()} trees" }
                             }
                             Icon { name: "arrow" }
@@ -1111,6 +1969,7 @@ fn Home(
                 button { class: "button secondary", onclick: on_import,
                     Icon { name: "folder" } "Load Folder"
                 }
+                button { class: "button secondary", onclick: on_import_json, "Load JSON" }
             }
         }
     }
@@ -1119,6 +1978,9 @@ fn Home(
 #[component]
 fn NewSession(
     data_root: String,
+    export_uri: String,
+    recent_varieties: Vec<String>,
+    recent_blocks: Vec<String>,
     on_cancel: EventHandler<MouseEvent>,
     on_warning: EventHandler<String>,
     on_saved: EventHandler<Session>,
@@ -1126,23 +1988,19 @@ fn NewSession(
     let mut variety = use_signal(String::new);
     let mut block = use_signal(String::new);
     let mut operator = use_signal(String::new);
-    let mut export_uri = use_signal(String::new);
-    let mut export_name = use_signal(String::new);
     let mut side_count = use_signal(|| 4_usize);
     let mut auto_id = use_signal(|| true);
     let mut form_error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
-    let mut choosing_folder = use_signal(|| false);
 
     let submit = move |event: FormEvent| {
         event.prevent_default();
-        if variety.read().trim().is_empty()
-            || block.read().trim().is_empty()
-            || export_uri.read().trim().is_empty()
-        {
-            form_error.set(Some(
-                "Variety, block, and SAF export folder are required.".into(),
-            ));
+        if variety.read().trim().is_empty() || block.read().trim().is_empty() {
+            form_error.set(Some("Variety and block are required.".into()));
+            return;
+        }
+        if export_uri.trim().is_empty() {
+            form_error.set(Some("Choose an export folder first.".into()));
             return;
         }
         let variety_value = variety.read().trim().to_string();
@@ -1157,7 +2015,7 @@ fn NewSession(
             auto_id: *auto_id.read(),
             next_id: 1,
             operator: operator.read().trim().into(),
-            export_uri: export_uri.read().trim().into(),
+            export_uri: export_uri.clone(),
             created_at: js_sys::Date::new_0().to_iso_string().into(),
             updated_at: js_sys::Date::new_0().to_iso_string().into(),
             trees: vec![],
@@ -1199,18 +2057,29 @@ fn NewSession(
                 label { class: "field",
                     span { "Variety" }
                     input {
-                        placeholder: "Example: DAMIMAS",
+                        placeholder: "DAMIMAS",
+                        list: "recent-varieties",
                         value: "{variety}",
                         oninput: move |event| variety.set(event.value())
                     }
-                    small { "Locked for every tree in this session." }
+                    datalist { id: "recent-varieties",
+                        for value in recent_varieties {
+                            option { value: "{value}" }
+                        }
+                    }
                 }
                 label { class: "field",
                     span { "Block" }
                     input {
-                        placeholder: "Example: A21B",
+                        placeholder: "A21B",
+                        list: "recent-blocks",
                         value: "{block}",
                         oninput: move |event| block.set(event.value())
+                    }
+                    datalist { id: "recent-blocks",
+                        for value in recent_blocks {
+                            option { value: "{value}" }
+                        }
                     }
                 }
                 label { class: "field",
@@ -1220,41 +2089,6 @@ fn NewSession(
                         value: "{operator}",
                         oninput: move |event| operator.set(event.value())
                     }
-                }
-                label { class: "field",
-                    span { "SAF export folder URI" }
-                    div { class: "input-action",
-                        input {
-                            placeholder: "content://...",
-                            value: "{export_uri}",
-                            readonly: true
-                        }
-                        button {
-                            class: "button secondary",
-                            r#type: "button",
-                            disabled: *choosing_folder.read(),
-                            onclick: move |_| {
-                                choosing_folder.set(true);
-                                form_error.set(None);
-                                spawn(async move {
-                                    match pick_saf_folder().await {
-                                        Ok(Some(folder)) => {
-                                            export_uri.set(folder.uri);
-                                            export_name.set(folder.name);
-                                        }
-                                        Ok(None) => {}
-                                        Err(message) => form_error.set(Some(message)),
-                                    }
-                                    choosing_folder.set(false);
-                                });
-                            },
-                            if *choosing_folder.read() { "Opening..." } else { "Choose" }
-                        }
-                    }
-                    if !export_name.read().is_empty() {
-                        small { "Selected: {export_name}" }
-                    }
-                    small { "Required before any tree is created. Mirror failures never discard local primary data." }
                 }
                 label { class: "field",
                     span { "Photos per tree" }
@@ -1285,15 +2119,6 @@ fn NewSession(
                     }
                 }
             }
-            aside { class: "form-aside",
-                h3 { "Local first, export visible" }
-                ul {
-                    li { strong { "Primary" } span { "Tauri app data / PalmAnnotate" } }
-                    li { strong { "Mirror" } span { "Selected SAF folder" } }
-                    li { strong { "Output" } span { "JSON v4 and YOLO TXT" } }
-                    li { strong { "Conflict" } span { "Import refuses silent overwrite" } }
-                }
-            }
         }
     }
 }
@@ -1302,7 +2127,10 @@ fn NewSession(
 fn SessionDetail(
     session: Option<Session>,
     data_root: String,
+    export_uri: String,
+    on_home: EventHandler<MouseEvent>,
     on_capture: EventHandler<MouseEvent>,
+    on_open_tree: EventHandler<String>,
     on_warning: EventHandler<String>,
     on_sessions_updated: EventHandler<Vec<Session>>,
     on_deleted: EventHandler<Vec<Session>>,
@@ -1318,45 +2146,32 @@ fn SessionDetail(
     let mut busy = use_signal(|| false);
     let mut detail_error = use_signal(|| None::<String>);
     let session_for_delete = session.clone();
+    let session_for_backup = session.clone();
     let data_root_for_delete = data_root.clone();
+    let export_uri_for_delete = export_uri.clone();
     let delete = move |_| {
         let target = session_for_delete.clone();
+        if !confirm_action(&format!("Delete session {}?", target.name)) {
+            return;
+        }
         busy.set(true);
         detail_error.set(None);
         let data_root = data_root_for_delete.clone();
+        let export_uri = export_uri_for_delete.clone();
         spawn(async move {
             match delete_session(target.id.clone()).await {
                 Ok(sessions) => {
                     let mut mirror_failed = None;
                     for tree in &target.trees {
-                        let mut paths = vec![
-                            format!("trees/{}.json", tree.id),
-                            format!("Output JSON/{}.json", tree.tree_name),
-                        ];
-                        for side in 1..=tree.side_count {
-                            paths.push(format!("Output TXT/{}_{}.txt", tree.tree_name, side));
-                            paths.push(format!(
-                                "dataset/images/field/{}_{}.jpg",
-                                tree.tree_name, side
-                            ));
-                            paths.push(format!(
-                                "dataset/depth/field/{}_{}.raw",
-                                tree.tree_name, side
-                            ));
-                            paths.push(format!(
-                                "dataset/depth/field/{}_{}.raw.json",
-                                tree.tree_name, side
-                            ));
-                        }
-                        for path in paths {
-                            if let Err(message) = delete_from_saf(&target.export_uri, &path).await {
+                        for path in tree_artifact_paths(tree) {
+                            if let Err(message) = delete_from_saf(&export_uri, &path).await {
                                 mirror_failed = Some(message);
                                 break;
                             }
                         }
                     }
                     if let Err(message) = copy_to_saf(
-                        &target.export_uri,
+                        &export_uri,
                         "sessions.json",
                         &local_path(&data_root, "sessions.json"),
                         "application/json",
@@ -1377,80 +2192,121 @@ fn SessionDetail(
             busy.set(false);
         });
     };
+    let backup = move |_| {
+        let session = session_for_backup.clone();
+        busy.set(true);
+        detail_error.set(None);
+        spawn(async move {
+            match export_session(session.id).await {
+                Ok(data) => {
+                    let mut copied = 0;
+                    for file in &data.export_files {
+                        match copy_to_saf(
+                            &data.export_uri,
+                            &file.relative_path,
+                            &file.source_path,
+                            &file.mime_type,
+                        )
+                        .await
+                        {
+                            Ok(()) => copied += 1,
+                            Err(message) => {
+                                detail_error.set(Some(message));
+                                break;
+                            }
+                        }
+                    }
+                    if copied > 0 {
+                        on_warning.call("Session JSON saved.".into());
+                    }
+                }
+                Err(message) => detail_error.set(Some(message)),
+            }
+            busy.set(false);
+        });
+    };
     rsx! {
         div { class: "detail-grid",
             section { class: "detail-summary",
-                h2 { "{session.name}" }
-                p { "{session.side_count} sides per tree / next tree {session.next_id:04} / operator {session.operator}" }
+                div { class: "screen-title",
+                    button { class: "icon-button", onclick: on_home, aria_label: "Back",
+                        Icon { name: "back" }
+                    }
+                    h2 { "{session.name}" }
+                }
+                p { "{session.side_count} sides / next {session.next_id:04}" }
                 if let Some(message) = detail_error.read().as_ref() {
                     div { class: "inline-error", "{message}" }
                 }
-                button { class: "button primary", onclick: on_capture, Icon { name: "camera" } "Capture new tree" }
-                button { class: "button ghost", disabled: *busy.read(), onclick: delete,
-                    if *busy.read() { "Deleting..." } else { "Delete session and data" }
+                div { class: "form-actions",
+                    button { class: "button primary", onclick: on_capture, Icon { name: "camera" } "Add Tree" }
+                    button { class: "button secondary", disabled: *busy.read(), onclick: backup, "Session JSON" }
+                    button { class: "button ghost danger-text", disabled: *busy.read(), onclick: delete,
+                        if *busy.read() { "Deleting..." } else { "Delete Session" }
+                    }
                 }
             }
-            WorkflowRail {}
-            section { class: "empty-table",
-                div { h3 { "Trees" } span { "{session.trees.len()} records" } }
+            section { class: "tree-list",
+                div { class: "list-head", h3 { "Trees" } span { "{session.trees.len()}" } }
                 if session.trees.is_empty() {
-                    p { "No tree has been captured in this session." }
+                    p { class: "empty-simple", "No trees" }
                 } else {
                     div { class: "placeholder-rows",
                         for tree in session.trees.clone() {
                             div {
-                                span { "{tree.tree_name}" }
-                                i {}
-                                strong { "{tree.status}" }
+                                class: "tree-row",
+                                onclick: {
+                                    let tree_id = tree.id.clone();
+                                    move |_| on_open_tree.call(tree_id.clone())
+                                },
+                                div {
+                                    strong { "{tree.tree_name}" }
+                                    span { "{tree.status}" }
+                                }
+                                Icon { name: "arrow" }
                                 button {
                                     class: "class-button danger",
                                     disabled: *busy.read(),
                                     onclick: {
                                         let tree = tree.clone();
-                                        let export_uri = session.export_uri.clone();
+                                        let export_uri = export_uri.clone();
                                         let data_root = data_root.clone();
-                                        move |_| {
+                                        move |event: MouseEvent| {
+                                            event.stop_propagation();
                                             let tree = tree.clone();
+                                            if !confirm_action(&format!("Delete tree {}?", tree.tree_name)) {
+                                                return;
+                                            }
                                             let export_uri = export_uri.clone();
                                             let data_root = data_root.clone();
                                             busy.set(true);
                                             detail_error.set(None);
                                             spawn(async move {
-                                                match delete_tree(tree.id.clone()).await {
-                                                    Ok(()) => {
-                                                        let mut paths = vec![
-                                                            format!("trees/{}.json", tree.id),
-                                                            format!("Output JSON/{}.json", tree.tree_name),
-                                                        ];
-                                                        for side in 1..=tree.side_count {
-                                                            paths.push(format!("Output TXT/{}_{}.txt", tree.tree_name, side));
-                                                            paths.push(format!("dataset/images/field/{}_{}.jpg", tree.tree_name, side));
-                                                            paths.push(format!("dataset/depth/field/{}_{}.raw", tree.tree_name, side));
-                                                            paths.push(format!("dataset/depth/field/{}_{}.raw.json", tree.tree_name, side));
-                                                        }
-                                                        for path in paths {
-                                                            if let Err(message) = delete_from_saf(&export_uri, &path).await {
-                                                                on_warning.call(format!("Tree deleted locally, but SAF cleanup was incomplete: {message}"));
-                                                                break;
-                                                            }
-                                                        }
-                                                        match list_sessions().await {
-                                                            Ok(sessions) => {
-                                                                let _ = copy_to_saf(
-                                                                    &export_uri,
-                                                                    "sessions.json",
-                                                                    &local_path(&data_root, "sessions.json"),
-                                                                    "application/json",
-                                                                ).await;
-                                                                on_sessions_updated.call(sessions);
-                                                            }
-                                                            Err(message) => detail_error.set(Some(message)),
+                                            match delete_tree(tree.id.clone()).await {
+                                                Ok(()) => {
+                                                    for path in tree_artifact_paths(&tree) {
+                                                        if let Err(message) = delete_from_saf(&export_uri, &path).await {
+                                                            on_warning.call(format!("Tree deleted locally, but SAF cleanup was incomplete: {message}"));
+                                                            break;
                                                         }
                                                     }
-                                                    Err(message) => detail_error.set(Some(message)),
+                                                    match list_sessions().await {
+                                                        Ok(sessions) => {
+                                                            let _ = copy_to_saf(
+                                                                &export_uri,
+                                                                "sessions.json",
+                                                                &local_path(&data_root, "sessions.json"),
+                                                                "application/json",
+                                                            ).await;
+                                                            on_sessions_updated.call(sessions);
+                                                        }
+                                                        Err(message) => detail_error.set(Some(message)),
+                                                    }
                                                 }
-                                                busy.set(false);
-                                            });
+                                                Err(message) => detail_error.set(Some(message)),
+                                            }
+                                            busy.set(false);
+                                        });
                                         }
                                     },
                                     "Delete"
@@ -1480,7 +2336,7 @@ fn WorkflowRail() -> Element {
 }
 
 #[component]
-fn Capture(
+fn LegacyCapture(
     session: Option<Session>,
     on_cancel: EventHandler<MouseEvent>,
     on_complete: EventHandler<PendingCapture>,
@@ -1752,7 +2608,7 @@ fn Capture(
 }
 
 #[component]
-fn Review(
+fn LegacyReview(
     capture: Option<PendingCapture>,
     data_root: String,
     on_retake: EventHandler<MouseEvent>,
@@ -1838,7 +2694,7 @@ fn Review(
 }
 
 #[component]
-fn Annotate(
+fn LegacyAnnotate(
     tree_id: Option<String>,
     data_root: String,
     on_next: EventHandler<MouseEvent>,
@@ -2082,7 +2938,7 @@ fn Annotate(
 }
 
 #[component]
-fn Dedup(tree_id: Option<String>, on_results: EventHandler<MouseEvent>) -> Element {
+fn LegacyDedup(tree_id: Option<String>, on_results: EventHandler<MouseEvent>) -> Element {
     let mut tree = use_signal(|| None::<TreeData>);
     let mut pair_index = use_signal(|| 0_usize);
     let mut bbox_a = use_signal(String::new);
@@ -2313,7 +3169,7 @@ fn Dedup(tree_id: Option<String>, on_results: EventHandler<MouseEvent>) -> Eleme
 }
 
 #[component]
-fn Results(tree_id: Option<String>) -> Element {
+fn LegacyResults(tree_id: Option<String>) -> Element {
     let mut result = use_signal(|| None::<ComputeData>);
     let mut busy = use_signal(|| false);
     let mut result_error = use_signal(|| None::<String>);
@@ -2398,7 +3254,7 @@ fn Results(tree_id: Option<String>) -> Element {
 }
 
 #[component]
-fn DepthViewer(tree_id: Option<String>) -> Element {
+fn LegacyDepthViewer(tree_id: Option<String>) -> Element {
     let mut side_index = use_signal(|| 0_usize);
     let mut preview = use_signal(|| None::<DepthRenderData>);
     let mut busy = use_signal(|| false);
@@ -2463,28 +3319,67 @@ fn DepthViewer(tree_id: Option<String>) -> Element {
 }
 
 #[component]
-fn Settings(data_root: String) -> Element {
-    let mut saf = use_signal(|| "Not selected".to_string());
+fn Settings(
+    settings: AppSettings,
+    data_root: String,
+    on_back: EventHandler<MouseEvent>,
+    on_saved: EventHandler<AppSettings>,
+) -> Element {
+    let initial_uri = settings.export_uri;
+    let initial_folder = if settings.export_name.is_empty() {
+        "Not selected".to_string()
+    } else {
+        settings.export_name
+    };
+    let mut saf_uri = use_signal(move || initial_uri);
+    let mut saf = use_signal(move || initial_folder);
     let mut camera = use_signal(|| "Tap to check".to_string());
     let mut orbbec = use_signal(|| "Tap to refresh".to_string());
     let mut notice = use_signal(|| None::<String>);
 
     rsx! {
         div { class: "settings-list",
+            div { class: "screen-title",
+                button { class: "icon-button", onclick: on_back, aria_label: "Back",
+                    Icon { name: "back" }
+                }
+                h2 { "Settings" }
+            }
             if let Some(message) = notice.read().as_ref() {
                 div { class: "inline-error", "{message}" }
             }
-            section { h2 { "Local primary store" } code { "{data_root}" } }
             div { class: "setting-row",
-                div { strong { "SAF export folder" } span { "{saf}" } }
+                div { strong { "Export folder" } span { "{saf}" } }
                 button { class: "button secondary",
                     onclick: move |_| {
                         notice.set(None);
+                        let data_root = data_root.clone();
                         spawn(async move {
                             match pick_saf_folder().await {
                                 Ok(Some(folder)) => {
-                                    let label = if folder.name.is_empty() { folder.uri } else { folder.name };
-                                    saf.set(label);
+                                    let next = AppSettings {
+                                        export_uri: folder.uri,
+                                        export_name: folder.name,
+                                        ..AppSettings::default()
+                                    };
+                                    match save_app_settings(next).await {
+                                        Ok(saved) => {
+                                            if let Err(message) = mirror_sessions_index(
+                                                &data_root,
+                                                &saved.export_uri,
+                                            ).await {
+                                                notice.set(Some(format!("Folder selected: {message}")));
+                                            }
+                                            saf.set(if saved.export_name.is_empty() {
+                                                "Selected".into()
+                                            } else {
+                                                saved.export_name.clone()
+                                            });
+                                            saf_uri.set(saved.export_uri.clone());
+                                            on_saved.call(saved);
+                                        }
+                                        Err(message) => notice.set(Some(message)),
+                                    }
                                 }
                                 Ok(None) => {}
                                 Err(message) => notice.set(Some(message)),
@@ -2492,6 +3387,29 @@ fn Settings(data_root: String) -> Element {
                         });
                     },
                     "Choose folder"
+                }
+                if !saf_uri.read().is_empty() {
+                    button { class: "button ghost danger-text",
+                        onclick: move |_| {
+                            let uri = saf_uri.read().clone();
+                            spawn(async move {
+                                notice.set(None);
+                                if let Err(message) = release_saf_folder(&uri).await {
+                                    notice.set(Some(message));
+                                    return;
+                                }
+                                match save_app_settings(AppSettings::default()).await {
+                                    Ok(saved) => {
+                                        saf_uri.set(String::new());
+                                        saf.set("Not selected".into());
+                                        on_saved.call(saved);
+                                    }
+                                    Err(message) => notice.set(Some(message)),
+                                }
+                            });
+                        },
+                        "Clear"
+                    }
                 }
             }
             div { class: "setting-row",
@@ -2516,7 +3434,7 @@ fn Settings(data_root: String) -> Element {
                 button { class: "button secondary",
                     onclick: move |_| {
                         spawn(async move {
-                            match native_empty::<serde_json::Value>("plugin:palm-native|orbbec_status").await {
+                            match native_empty::<serde_json::Value>("plugin:palm-native|orbbec_refresh").await {
                                 Ok(value) => {
                                     let count = value.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0);
                                     orbbec.set(if count > 0 { format!("{count} device(s) attached") } else { "Not attached".into() });
@@ -2528,7 +3446,6 @@ fn Settings(data_root: String) -> Element {
                     "Refresh"
                 }
             }
-            section { h2 { "Offline detector" } code { "ffb-detector.onnx / 640 px" } }
         }
     }
 }
@@ -2591,6 +3508,7 @@ fn Icon(name: &'static str) -> Element {
         "chart" => "M5 20V10M12 20V4M19 20v-7",
         "depth" => "M3 12c4-6 14-6 18 0-4 6-14 6-18 0zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
         "settings" => "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM4 12h2M18 12h2M12 4v2M12 18v2M6.3 6.3l1.4 1.4M16.3 16.3l1.4 1.4M17.7 6.3l-1.4 1.4M7.7 16.3l-1.4 1.4",
+        "back" => "M19 12H5M10 7l-5 5 5 5",
         "plus" => "M12 5v14M5 12h14",
         "folder" => "M3 6h7l2 2h9v11H3z",
         "tree" => "M12 3l5 7h-3l4 6h-5v5h-2v-5H6l4-6H7z",
@@ -2606,12 +3524,112 @@ fn Icon(name: &'static str) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalized_block, normalized_segment};
+    use super::{
+        add_confirmed_link, delete_bbox, move_bbox, normalized_block, normalized_segment,
+        resize_bbox, set_connected_bbox_class, sides_are_adjacent, BoxData, ResizeHandle, SideData,
+        TreeData,
+    };
+
+    fn bbox(id: &str) -> BoxData {
+        BoxData {
+            id: id.into(),
+            class_id: -1,
+            class_name: "U".into(),
+            x1: 10.0,
+            y1: 10.0,
+            x2: 30.0,
+            y2: 30.0,
+            confidence: None,
+        }
+    }
+
+    fn tree() -> TreeData {
+        let mut sides = (0..4)
+            .map(|side_index| SideData {
+                side_index,
+                label: format!("Side {}", side_index + 1),
+                image_path: format!("images/field/TREE_0001_{}.jpg", side_index + 1),
+                image_width: 100,
+                image_height: 100,
+                depth_path: None,
+                depth: None,
+                bboxes: vec![bbox(&format!("b{side_index}"))],
+                original_bboxes: Vec::new(),
+                cache_bust: None,
+            })
+            .collect::<Vec<_>>();
+        sides[1].bboxes.push(bbox("b1-alt"));
+        TreeData {
+            version: 4,
+            id: "tree-1".into(),
+            session_id: "session-1".into(),
+            tree_name: "TREE_0001".into(),
+            split: "field".into(),
+            side_count: 4,
+            metadata: serde_json::json!({}),
+            sides,
+            confirmed_links: Vec::new(),
+            status: "annotated".into(),
+        }
+    }
 
     #[test]
     fn canonical_tree_tokens_match_legacy_capture_names() {
         assert_eq!(normalized_segment("Tenera hybrid"), "TENERA_HYBRID");
         assert_eq!(normalized_block("b-07"), "B07");
         assert_eq!(normalized_block("A 21b"), "A21B");
+    }
+
+    #[test]
+    fn links_require_adjacent_sides_and_replace_pair_endpoints() {
+        assert!(sides_are_adjacent(0, 3, 4));
+        assert!(!sides_are_adjacent(0, 2, 4));
+
+        let mut tree = tree();
+        add_confirmed_link(&mut tree, 0, "b0".into(), 1, "b1".into()).unwrap();
+        add_confirmed_link(&mut tree, 1, "b1".into(), 2, "b2".into()).unwrap();
+        add_confirmed_link(&mut tree, 0, "b0".into(), 1, "b1-alt".into()).unwrap();
+
+        assert_eq!(tree.confirmed_links.len(), 2);
+        assert!(tree
+            .confirmed_links
+            .iter()
+            .any(|link| link.bbox_id_b == "b1-alt"));
+        assert!(add_confirmed_link(&mut tree, 0, "b0".into(), 2, "b2".into()).is_err());
+    }
+
+    #[test]
+    fn class_changes_propagate_and_delete_removes_links() {
+        let mut tree = tree();
+        add_confirmed_link(&mut tree, 0, "b0".into(), 1, "b1".into()).unwrap();
+        add_confirmed_link(&mut tree, 1, "b1".into(), 2, "b2".into()).unwrap();
+
+        assert_eq!(set_connected_bbox_class(&mut tree, 0, "b0", 2), 3);
+        assert_eq!(tree.sides[2].bboxes[0].class_name, "B3");
+        assert!(delete_bbox(&mut tree, 1, "b1"));
+        assert!(tree.confirmed_links.is_empty());
+    }
+
+    #[test]
+    fn bbox_move_and_resize_stay_inside_image() {
+        let original = bbox("box");
+        let mut moved = original.clone();
+        move_bbox(&mut moved, &original, 200.0, 200.0, 100.0, 100.0);
+        assert_eq!(
+            (moved.x1, moved.y1, moved.x2, moved.y2),
+            (80.0, 80.0, 100.0, 100.0)
+        );
+
+        let mut resized = original.clone();
+        resize_bbox(
+            &mut resized,
+            &original,
+            ResizeHandle::NorthWest,
+            29.0,
+            29.0,
+            100.0,
+            100.0,
+        );
+        assert_eq!((resized.x1, resized.y1), (26.0, 26.0));
     }
 }

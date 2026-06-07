@@ -16,6 +16,15 @@ Reference (source of truth for behavior): `../PalmAnnotate-Android/` (esp. its `
 
 ## 0. TL;DR status
 
+> **Update 2026-06-07 (this round):** see `CHANGELOG.md` and `STATUS.md` for the current
+> snapshot. Two blockers that made the app unusable were found by running the real APK on the
+> Xiaomi Pad 6 and **fixed + verified**: (1) the app crashed instantly on launch — R8 had
+> stripped the JNI-called `MainActivity.getId()` (ProGuard keep rules added); (2) the camera
+> live preview never showed — replaced the fragile native CameraX preview pump with the JS
+> app's `getUserMedia` → `<video>` approach (live feed confirmed on device). Also fixed: the
+> Android back gesture closed the whole app (now bridged to in-app `__paBack` navigation).
+> The notes below predate this round and are kept for history.
+
 - The app is **NOT "nothing works"** — on-device screenshots show: create session, CameraX
   capture of 4 sides (3264×2448), full tab navigation, workflow rail, local save all working.
 - Two concrete bugs were found from the device screenshots and **fixed in code this round**

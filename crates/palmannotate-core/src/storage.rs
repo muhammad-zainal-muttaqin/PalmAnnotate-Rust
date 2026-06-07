@@ -1,4 +1,7 @@
-use crate::{build_output_v4, serialize_yolo, AppError, AppResult, BBox, Session, Tree, TreeSummary};
+use crate::{
+    build_output_v4, serialize_yolo, AppError, AppResult, AppSettings, BBox, Session, Tree,
+    TreeSummary,
+};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,15 +44,91 @@ impl AppStore {
         if !self.sessions_path().exists() {
             self.atomic_json(&self.sessions_path(), &Vec::<Session>::new())?;
         }
+        if !self.settings_path().exists() {
+            let sessions = self.list_sessions()?;
+            let settings = sessions
+                .iter()
+                .find(|session| !session.export_uri.trim().is_empty())
+                .map(|session| AppSettings {
+                    export_uri: session.export_uri.clone(),
+                    export_name: String::new(),
+                    ..AppSettings::default()
+                })
+                .unwrap_or_default();
+            self.atomic_json(&self.settings_path(), &settings)?;
+        }
         Ok(())
     }
 
+    pub fn load_settings(&self) -> AppResult<AppSettings> {
+        Ok(serde_json::from_slice(&fs::read(self.settings_path())?)?)
+    }
+
+    pub fn save_settings(&self, settings: &AppSettings) -> AppResult<AppSettings> {
+        let current = if self.settings_path().is_file() {
+            self.load_settings().unwrap_or_default()
+        } else {
+            AppSettings::default()
+        };
+        let settings = AppSettings {
+            export_uri: settings.export_uri.trim().to_string(),
+            export_name: settings.export_name.trim().to_string(),
+            recent_varieties: normalized_recent(
+                if settings.recent_varieties.is_empty() {
+                    current.recent_varieties
+                } else {
+                    settings.recent_varieties.clone()
+                },
+                true,
+            ),
+            recent_blocks: normalized_recent(
+                if settings.recent_blocks.is_empty() {
+                    current.recent_blocks
+                } else {
+                    settings.recent_blocks.clone()
+                },
+                false,
+            ),
+        };
+        self.atomic_json(&self.settings_path(), &settings)?;
+
+        let mut sessions = self.list_sessions()?;
+        for session in &mut sessions {
+            session.export_uri = settings.export_uri.clone();
+        }
+        self.atomic_json(&self.sessions_path(), &sessions)?;
+        Ok(settings)
+    }
+
     pub fn list_sessions(&self) -> AppResult<Vec<Session>> {
-        Ok(serde_json::from_slice(&fs::read(self.sessions_path())?)?)
+        let mut sessions: Vec<Session> = serde_json::from_slice(&fs::read(self.sessions_path())?)?;
+        for session in &mut sessions {
+            session.trees.sort_by(|left, right| {
+                left.tree_id
+                    .cmp(&right.tree_id)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+        }
+        sessions.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        Ok(sessions)
     }
 
     pub fn save_session(&self, session: &Session) -> AppResult<Session> {
-        if session.export_uri.trim().is_empty() {
+        let mut settings = self.load_settings()?;
+        if settings.export_uri.is_empty() && !session.export_uri.trim().is_empty() {
+            settings = self.save_settings(&AppSettings {
+                export_uri: session.export_uri.clone(),
+                export_name: String::new(),
+                ..AppSettings::default()
+            })?;
+        }
+        if settings.export_uri.is_empty() {
             return Err(AppError::Validation(
                 "An SAF export folder is required before creating a session.".into(),
             ));
@@ -60,7 +139,11 @@ impl AppStore {
             ));
         }
         let mut session = session.clone();
+        session.export_uri = settings.export_uri.clone();
         session.group_key = crate::group_key_for(&session.variety, &session.block);
+        remember_recent(&mut settings.recent_varieties, &session.variety);
+        remember_recent(&mut settings.recent_blocks, &session.block);
+        self.atomic_json(&self.settings_path(), &settings)?;
         session.next_id = session
             .trees
             .iter()
@@ -122,7 +205,7 @@ impl AppStore {
         for side in &tree.sides {
             let text = serialize_yolo(&side.bboxes, side.image_width, side.image_height);
             self.atomic_write(
-                &self.root.join("Output TXT").join(format!(
+                &self.root.join("Output TXT").join(&tree.split).join(format!(
                     "{}_{}.txt",
                     tree.tree_name,
                     side.side_index + 1
@@ -204,11 +287,16 @@ impl AppStore {
                 fs::remove_file(path)?;
             }
         }
-        for directory in ["dataset", "Output TXT", "snapshots"] {
+        for directory in ["dataset", "Output TXT", "exports"] {
             let path = self.root.join(directory);
             if path.exists() {
                 remove_tree_artifacts(&path, tree_name)?;
             }
+        }
+        let snapshots = self.root.join("snapshots");
+        if snapshots.exists() {
+            remove_tree_artifacts(&snapshots, tree_name)?;
+            remove_tree_artifacts(&snapshots, id)?;
         }
 
         let mut sessions = self.list_sessions()?;
@@ -227,12 +315,13 @@ impl AppStore {
 
     pub fn import_sessions(&self, incoming: Vec<Session>) -> AppResult<Vec<Session>> {
         let mut sessions = self.list_sessions()?;
+        let mut known = sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<std::collections::HashSet<_>>();
         for session in incoming {
-            if sessions.iter().any(|current| current.id == session.id) {
-                return Err(AppError::Conflict(format!(
-                    "Session id {} already exists; import does not overwrite.",
-                    session.id
-                )));
+            if session.id.trim().is_empty() || !known.insert(session.id.clone()) {
+                continue;
             }
             sessions.push(session);
         }
@@ -261,6 +350,10 @@ impl AppStore {
         self.root.join("sessions.json")
     }
 
+    fn settings_path(&self) -> PathBuf {
+        self.root.join("settings.json")
+    }
+
     fn tree_path(&self, id: &str) -> PathBuf {
         self.root.join("trees").join(format!("{id}.json"))
     }
@@ -281,6 +374,32 @@ impl AppStore {
         fs::rename(temporary, path)?;
         Ok(())
     }
+}
+
+fn normalized_recent(values: Vec<String>, seed_damimas: bool) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        remember_recent(&mut normalized, &value);
+    }
+    if seed_damimas
+        && !normalized
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("DAMIMAS"))
+    {
+        normalized.push("DAMIMAS".into());
+    }
+    normalized.truncate(8);
+    normalized
+}
+
+fn remember_recent(values: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    values.retain(|item| !item.eq_ignore_ascii_case(value));
+    values.insert(0, value.to_string());
+    values.truncate(8);
 }
 
 /// Shape one bbox for the annotation behavior log, matching the JS `_annotLogShape`:
@@ -329,6 +448,15 @@ fn validate_tree(tree: &Tree) -> AppResult<()> {
         return Err(AppError::Validation(format!(
             "Tree {} must contain exactly its declared 4 or 8 sides.",
             tree.tree_name
+        )));
+    }
+    if !matches!(
+        tree.split.as_str(),
+        "field" | "train" | "val" | "test" | "unknown"
+    ) {
+        return Err(AppError::Validation(format!(
+            "Tree {} uses unsupported split {:?}.",
+            tree.tree_name, tree.split
         )));
     }
     let mut endpoints = HashSet::new();

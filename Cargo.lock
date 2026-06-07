@@ -2846,6 +2846,7 @@ checksum = "d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90"
 name = "palmannotate"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "image",
  "ndarray",
@@ -2878,6 +2879,7 @@ version = "0.1.0"
 dependencies = [
  "dioxus",
  "dioxus-logger",
+ "dioxus-web",
  "js-sys",
  "serde",
  "serde-wasm-bindgen 0.6.5",

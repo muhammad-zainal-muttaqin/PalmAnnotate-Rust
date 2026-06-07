@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-orbbec-refresh"
+description = "Enables the orbbec_refresh command without any pre-configured scope."
+commands.allow = ["orbbec_refresh"]
+
+[[permission]]
+identifier = "deny-orbbec-refresh"
+description = "Denies the orbbec_refresh command without any pre-configured scope."
+commands.deny = ["orbbec_refresh"]

@@ -28,6 +28,7 @@ tauri-plugin-palm-native = { path = "../plugins/palm-native" }
 tauri-plugin-geolocation = "2"
 thiserror = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+base64 = "0.22"
 
 [target.'cfg(target_os = "android")'.dependencies]
 ndarray = "0.17"

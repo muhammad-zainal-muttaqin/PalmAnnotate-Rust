@@ -1,7 +1,7 @@
 use palmannotate_core::{
     build_output_v4, check_tree, compute_results, load_output_v4, parse_yolo, suggest_tree,
-    AppError, AppStore, ErrorPayload, LinkSuggestion, OutputV4, QualityReport, Session, Side, Tree,
-    TreeMetadata, TreeStatus,
+    AppError, AppSettings, AppStore, ErrorPayload, LinkSuggestion, OutputV4, QualityReport,
+    Session, Side, Tree, TreeMetadata, TreeStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -16,6 +16,9 @@ struct AppState {
 
 type CommandResult<T> = Result<T, ErrorPayload>;
 
+/// Monotonic counter for unique temporary capture filenames within a run.
+static FRAME_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn command<T>(result: Result<T, AppError>) -> CommandResult<T> {
     result.map_err(|error| error.payload())
 }
@@ -26,6 +29,7 @@ struct Bootstrap {
     product_name: &'static str,
     schema_version: u8,
     data_root: String,
+    settings: AppSettings,
     sessions: Vec<Session>,
     platform: &'static str,
 }
@@ -35,6 +39,36 @@ struct Bootstrap {
 struct CaptureCommit {
     tree: Tree,
     temporary_files: Vec<TemporaryFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonImportRequest {
+    file_path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonImportResponse {
+    tree_id: String,
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnnotationImport {
+    tree_name: String,
+    sides: Vec<AnnotationSideImport>,
+    #[serde(default, alias = "_confirmedLinks")]
+    confirmed_links: Vec<palmannotate_core::ConfirmedLink>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnnotationSideImport {
+    side_index: usize,
+    #[serde(default)]
+    bboxes: Vec<palmannotate_core::BBox>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +98,13 @@ struct ExportFile {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ExportResponse {
+    export_uri: String,
+    export_files: Vec<ExportFile>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DetectorResponse {
     boxes: Vec<palmannotate_core::BBox>,
     model: &'static str,
@@ -86,10 +127,12 @@ fn bootstrap(state: State<'_, AppState>) -> CommandResult<Bootstrap> {
         message: "Application storage lock is unavailable.".into(),
         recoverable: true,
     })?;
+    let settings = command(store.load_settings())?;
     command(store.list_sessions()).map(|sessions| Bootstrap {
         product_name: "PalmAnnotate",
         schema_version: palmannotate_core::SCHEMA_VERSION,
         data_root: store.root().to_string_lossy().into_owned(),
+        settings,
         sessions,
         platform: if cfg!(target_os = "android") {
             "android"
@@ -97,6 +140,18 @@ fn bootstrap(state: State<'_, AppState>) -> CommandResult<Bootstrap> {
             "desktop"
         },
     })
+}
+
+#[tauri::command]
+fn settings_get(state: State<'_, AppState>) -> CommandResult<AppSettings> {
+    let store = lock_store(&state)?;
+    command(store.load_settings())
+}
+
+#[tauri::command]
+fn settings_save(state: State<'_, AppState>, settings: AppSettings) -> CommandResult<AppSettings> {
+    let store = lock_store(&state)?;
+    command(store.save_settings(&settings))
 }
 
 #[tauri::command]
@@ -118,6 +173,55 @@ fn session_delete(state: State<'_, AppState>, session_id: String) -> CommandResu
 }
 
 #[tauri::command]
+fn session_export(state: State<'_, AppState>, session_id: String) -> CommandResult<ExportResponse> {
+    let store = lock_store(&state)?;
+    let session = command(store.list_sessions().and_then(|sessions| {
+        sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| AppError::NotFound(format!("Session {session_id} was not found.")))
+    }))?;
+    let payload = serde_json::json!({
+        "id": session.id,
+        "variety": session.variety,
+        "blok": session.block,
+        "groupKey": session.group_key,
+        "sideCount": session.side_count,
+        "autoId": session.auto_id,
+        "createdAt": session.created_at,
+        "updatedAt": session.updated_at,
+        "pohon": session.trees.iter().map(|tree| serde_json::json!({
+            "name": tree.tree_name,
+            "treeId": tree.tree_id,
+            "sideCount": tree.side_count,
+        })).collect::<Vec<_>>(),
+    });
+    let filename = format!(
+        "{}_{}.json",
+        safe_filename_token(&session.group_key, "session"),
+        safe_filename_token(&session.id, "session")
+    );
+    let path = store
+        .root()
+        .join("dataset")
+        .join("sessions")
+        .join(&filename);
+    if let Some(parent) = path.parent() {
+        command(fs::create_dir_all(parent).map_err(AppError::from))?;
+    }
+    let bytes = command(serde_json::to_vec_pretty(&payload).map_err(AppError::from))?;
+    command(fs::write(&path, bytes).map_err(AppError::from))?;
+    Ok(ExportResponse {
+        export_uri: command(store.load_settings())?.export_uri,
+        export_files: vec![ExportFile {
+            relative_path: format!("sessions/{filename}"),
+            source_path: path.to_string_lossy().into_owned(),
+            mime_type: "application/json",
+        }],
+    })
+}
+
+#[tauri::command]
 fn sessions_import(
     state: State<'_, AppState>,
     sessions: Vec<Session>,
@@ -133,6 +237,17 @@ fn sessions_import_folder(
     export_uri: String,
 ) -> CommandResult<Vec<Session>> {
     let store = lock_store(&state)?;
+    let current = command(store.load_settings())?;
+    command(store.save_settings(&AppSettings {
+        export_uri: export_uri.clone(),
+        export_name: if current.export_uri == export_uri {
+            current.export_name
+        } else {
+            String::new()
+        },
+        recent_varieties: current.recent_varieties,
+        recent_blocks: current.recent_blocks,
+    }))?;
     command(import_folder(&store, Path::new(&folder_path), &export_uri))
 }
 
@@ -147,6 +262,18 @@ fn tree_save(state: State<'_, AppState>, tree: Tree) -> CommandResult<Tree> {
     let store = lock_store(&state)?;
     command(store.save_tree(&tree))?;
     Ok(tree)
+}
+
+#[tauri::command]
+fn tree_import_json(
+    state: State<'_, AppState>,
+    request: JsonImportRequest,
+) -> CommandResult<JsonImportResponse> {
+    let store = lock_store(&state)?;
+    command(import_tree_annotations(
+        &store,
+        Path::new(&request.file_path),
+    ))
 }
 
 #[tauri::command]
@@ -332,23 +459,108 @@ fn tree_compute(state: State<'_, AppState>, tree_id: String) -> CommandResult<Co
         tree.status = palmannotate_core::TreeStatus::Complete;
         command(store.save_tree(&tree))?;
     }
-    let sessions = command(store.list_sessions())?;
-    let export_uri = sessions
-        .iter()
-        .find(|session| session.id == tree.session_id)
-        .map(|session| session.export_uri.clone())
-        .ok_or_else(|| ErrorPayload {
-            code: "export_session_missing",
-            message: "The tree session is missing; exports remain local.".into(),
-            recoverable: true,
-        })?;
-    let export_files = command(write_tree_exports(&store, &tree, &result))?;
+    let export_uri = command(store.load_settings())?.export_uri;
     Ok(ComputeResponse {
         result,
         quality,
         output: build_output_v4(&tree),
         export_uri,
+        export_files: Vec::new(),
+    })
+}
+
+#[tauri::command]
+fn tree_export(
+    state: State<'_, AppState>,
+    tree_id: String,
+    export_kind: String,
+) -> CommandResult<ExportResponse> {
+    let store = lock_store(&state)?;
+    let tree = command(store.load_tree(&tree_id))?;
+    let result = compute_results(&tree);
+    let files = command(write_tree_exports(&store, &tree, &result))?;
+    let export_files = files
+        .into_iter()
+        .filter(|file| match export_kind.as_str() {
+            "output" => file.relative_path.starts_with("Output "),
+            "yolo" => {
+                file.relative_path.starts_with("exports/") && file.relative_path.ends_with(".txt")
+            }
+            "csv" => file.relative_path.ends_with("_result.csv"),
+            "session" => file.relative_path.ends_with("_session.json"),
+            "identity" => file.relative_path.ends_with("_identity.json"),
+            "all" => true,
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    if export_files.is_empty() {
+        return Err(ErrorPayload {
+            code: "export_kind",
+            message: format!("Unsupported or empty export type: {export_kind}."),
+            recoverable: true,
+        });
+    }
+    Ok(ExportResponse {
+        export_uri: command(store.load_settings())?.export_uri,
         export_files,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CameraFrameRequest {
+    base64: String,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapturedFrameDto {
+    path: String,
+    width: u32,
+    height: u32,
+    format: String,
+    source: String,
+}
+
+/// Persist a WebView-captured JPEG (getUserMedia → canvas) to a temporary file
+/// so it flows through the exact same commit/cleanup pipeline as a native
+/// capture. The web layer supplies the canvas dimensions, so no decode is
+/// needed here. Mirrors the JS app's getUserMedia capture path.
+#[tauri::command]
+fn camera_save_frame(
+    state: State<'_, AppState>,
+    payload: CameraFrameRequest,
+) -> CommandResult<CapturedFrameDto> {
+    use base64::Engine;
+    let store = lock_store(&state)?;
+    let temp_dir = store.root().join(".temp");
+    command(fs::create_dir_all(&temp_dir).map_err(AppError::from))?;
+    // Tolerate a full data URL or a bare base64 payload.
+    let encoded = payload
+        .base64
+        .rsplit(',')
+        .next()
+        .unwrap_or(&payload.base64)
+        .trim();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| ErrorPayload {
+            code: "camera_decode",
+            message: format!("Could not decode the captured frame: {error}"),
+            recoverable: true,
+        })?;
+    let seq = FRAME_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stamp = chrono::Utc::now().timestamp_micros();
+    let path = temp_dir.join(format!("web-{stamp}-{seq}.jpg"));
+    command(fs::write(&path, &bytes).map_err(AppError::from))?;
+    Ok(CapturedFrameDto {
+        path: path.to_string_lossy().into_owned(),
+        width: payload.width,
+        height: payload.height,
+        format: "jpeg".into(),
+        source: "web".into(),
     })
 }
 
@@ -486,10 +698,16 @@ fn write_tree_exports(
     });
     for side in &tree.sides {
         files.push(ExportFile {
-            relative_path: format!("Output TXT/{}_{}.txt", tree.tree_name, side.side_index + 1),
+            relative_path: format!(
+                "Output TXT/{}/{}_{}.txt",
+                tree.split,
+                tree.tree_name,
+                side.side_index + 1
+            ),
             source_path: store
                 .root()
                 .join("Output TXT")
+                .join(&tree.split)
                 .join(format!("{}_{}.txt", tree.tree_name, side.side_index + 1))
                 .to_string_lossy()
                 .into_owned(),
@@ -513,6 +731,25 @@ fn save_export_file(
         mime_type,
     });
     Ok(())
+}
+
+fn safe_filename_token(value: &str, fallback: &str) -> String {
+    let value = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let value = value.trim_matches('_');
+    if value.is_empty() {
+        fallback.into()
+    } else {
+        value.into()
+    }
 }
 
 #[tauri::command]
@@ -693,6 +930,142 @@ fn safe_relative_path(value: &str) -> CommandResult<PathBuf> {
     Ok(path.to_path_buf())
 }
 
+fn import_tree_annotations(
+    store: &AppStore,
+    source: &Path,
+) -> Result<JsonImportResponse, AppError> {
+    if !source.is_file() {
+        return Err(AppError::NotFound(
+            "The selected session JSON is no longer available.".into(),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(source)?)?;
+
+    enum Imported {
+        Tree(Tree),
+        Output(OutputV4),
+        Annotation(AnnotationImport),
+    }
+
+    let imported = if let Some(tree) = value.get("tree") {
+        Imported::Tree(serde_json::from_value(tree.clone())?)
+    } else if value.get("images").is_some() && value.get("bunches").is_some() {
+        Imported::Output(serde_json::from_value(value)?)
+    } else if let Ok(tree) = serde_json::from_value::<Tree>(value.clone()) {
+        Imported::Tree(tree)
+    } else {
+        Imported::Annotation(serde_json::from_value(value)?)
+    };
+    let tree_name = match &imported {
+        Imported::Tree(tree) => tree.tree_name.clone(),
+        Imported::Output(output) => output.tree_name.clone(),
+        Imported::Annotation(annotation) => annotation.tree_name.clone(),
+    };
+    let sessions = store.list_sessions()?;
+    let (session_id, tree_id) = sessions
+        .iter()
+        .find_map(|session| {
+            session
+                .trees
+                .iter()
+                .find(|tree| tree.tree_name == tree_name)
+                .map(|tree| (session.id.clone(), tree.id.clone()))
+        })
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Tree {tree_name} was not found. Load its dataset folder first."
+            ))
+        })?;
+    let mut existing = store.load_tree(&tree_id)?;
+
+    let (incoming_sides, incoming_links) = match imported {
+        Imported::Tree(tree) => (tree.sides, tree.confirmed_links),
+        Imported::Output(output) => {
+            let tree = load_output_v4(output, tree_id.clone(), session_id.clone())?;
+            (tree.sides, tree.confirmed_links)
+        }
+        Imported::Annotation(annotation) => {
+            let sides = annotation
+                .sides
+                .into_iter()
+                .map(|side| {
+                    let mut current = existing
+                        .sides
+                        .iter()
+                        .find(|item| item.side_index == side.side_index)
+                        .cloned()
+                        .ok_or_else(|| {
+                            AppError::Validation(format!(
+                                "Session JSON references missing side {}.",
+                                side.side_index + 1
+                            ))
+                        })?;
+                    current.bboxes = side.bboxes;
+                    current.original_bboxes = current.bboxes.clone();
+                    Ok(current)
+                })
+                .collect::<Result<Vec<_>, AppError>>()?;
+            (sides, annotation.confirmed_links)
+        }
+    };
+    if incoming_sides.len() != existing.side_count {
+        return Err(AppError::Validation(format!(
+            "Session JSON has {} sides but tree {tree_name} requires {}.",
+            incoming_sides.len(),
+            existing.side_count
+        )));
+    }
+    for incoming in incoming_sides {
+        let target = existing
+            .sides
+            .iter_mut()
+            .find(|side| side.side_index == incoming.side_index)
+            .ok_or_else(|| {
+                AppError::Validation(format!(
+                    "Session JSON references missing side {}.",
+                    incoming.side_index + 1
+                ))
+            })?;
+        target.bboxes = incoming.bboxes;
+        target.original_bboxes = if incoming.original_bboxes.is_empty() {
+            target.bboxes.clone()
+        } else {
+            incoming.original_bboxes
+        };
+    }
+    let endpoints = existing
+        .sides
+        .iter()
+        .flat_map(|side| {
+            side.bboxes
+                .iter()
+                .map(move |bbox| (side.side_index, bbox.id.clone()))
+        })
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    existing.confirmed_links = incoming_links
+        .into_iter()
+        .filter(|link| {
+            let distance = link.side_a.abs_diff(link.side_b);
+            let adjacent = distance == 1 || distance == existing.side_count - 1;
+            let left = (link.side_a, link.bbox_id_a.clone());
+            let right = (link.side_b, link.bbox_id_b.clone());
+            let key = if left <= right {
+                (left.clone(), right.clone())
+            } else {
+                (right.clone(), left.clone())
+            };
+            adjacent && endpoints.contains(&left) && endpoints.contains(&right) && seen.insert(key)
+        })
+        .collect();
+    existing.status = TreeStatus::Annotated;
+    store.save_tree(&existing)?;
+    Ok(JsonImportResponse {
+        tree_id,
+        session_id,
+    })
+}
+
 fn import_folder(
     store: &AppStore,
     source: &Path,
@@ -703,6 +1076,7 @@ fn import_folder(
             "Imported sessions require a writable SAF folder.".into(),
         ));
     }
+    let source = import_root(source);
     let manifest_path = source.join("sessions.json");
     let manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
     let session_values = manifest
@@ -726,9 +1100,7 @@ fn import_folder(
                 .iter()
                 .any(|session: &Session| session.id == id)
         {
-            return Err(AppError::Conflict(format!(
-                "Session id {id} already exists; import does not overwrite."
-            )));
+            continue;
         }
         let variety = json_string(value, &["variety"]).unwrap_or_else(|| "UNKNOWN".into());
         let block = json_string(value, &["block", "blok"]).unwrap_or_default();
@@ -775,24 +1147,40 @@ fn import_folder(
                 let output: OutputV4 = serde_json::from_slice(&fs::read(output_path)?)?;
                 load_output_v4(output, tree_id, session.id.clone())?
             } else {
-                import_unannotated_tree(source, &session, tree_value, tree_id, &tree_name)?
+                import_unannotated_tree(&source, &session, tree_value, tree_id, &tree_name)?
             };
             tree.metadata.variety = variety.clone();
             tree.metadata.block = block.clone();
             if tree.metadata.operator.is_empty() {
                 tree.metadata.operator = session.operator.clone();
             }
+            let resolved_split =
+                resolve_tree_split(&source, &tree_name, Some(&tree.split), tree.side_count)?;
+            tree.split = resolved_split.clone();
             for side in &mut tree.sides {
-                let relative = format!("images/field/{tree_name}_{}.jpg", side.side_index + 1);
-                let source_image = source.join("dataset").join(&relative);
-                if !source_image.is_file() {
-                    return Err(AppError::NotFound(format!(
-                        "Imported tree {tree_name} references missing {relative}."
-                    )));
-                }
+                let source_image = resolve_tree_image(
+                    &source,
+                    &resolved_split,
+                    &tree_name,
+                    side.side_index,
+                    Some(&side.image_path),
+                )?;
+                let extension = source_image
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("jpg")
+                    .to_ascii_lowercase();
+                let relative = format!(
+                    "images/{resolved_split}/{tree_name}_{}.{}",
+                    side.side_index + 1,
+                    extension
+                );
                 side.image_path = relative.clone();
                 copies.push((source_image, store.root().join("dataset").join(relative)));
-                let depth_relative = format!("depth/field/{tree_name}_{}.raw", side.side_index + 1);
+                let depth_relative = format!(
+                    "depth/{resolved_split}/{tree_name}_{}.raw",
+                    side.side_index + 1
+                );
                 let source_depth = source.join("dataset").join(&depth_relative);
                 if source_depth.is_file() {
                     side.depth_path = Some(depth_relative.clone());
@@ -849,18 +1237,25 @@ fn import_unannotated_tree(
     tree_name: &str,
 ) -> Result<Tree, AppError> {
     let side_count = json_usize(value, &["sideCount"]).unwrap_or(session.side_count);
+    let requested_split = json_string(value, &["split"]);
+    let split = resolve_tree_split(source, tree_name, requested_split.as_deref(), side_count)?;
     let mut sides = Vec::with_capacity(side_count);
     for side_index in 0..side_count {
-        let relative = format!("images/field/{tree_name}_{}.jpg", side_index + 1);
-        let image_path = source.join("dataset").join(&relative);
+        let image_path = resolve_tree_image(source, &split, tree_name, side_index, None)?;
+        let extension = image_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("jpg")
+            .to_ascii_lowercase();
+        let relative = format!(
+            "images/{split}/{tree_name}_{}.{}",
+            side_index + 1,
+            extension
+        );
         let (width, height) = image::image_dimensions(&image_path)
             .map_err(|error| AppError::Validation(error.to_string()))?;
-        let label_path = source
-            .join("dataset")
-            .join("labels")
-            .join("field")
-            .join(format!("{tree_name}_{}.txt", side_index + 1));
-        let bboxes = if label_path.is_file() {
+        let label_path = resolve_tree_label(source, &split, tree_name, side_index);
+        let bboxes = if let Some(label_path) = label_path {
             parse_yolo(&fs::read_to_string(label_path)?, width, height)
         } else {
             vec![]
@@ -883,7 +1278,7 @@ fn import_unannotated_tree(
         id,
         session_id: session.id.clone(),
         tree_name: tree_name.into(),
-        split: "field".into(),
+        split,
         side_count,
         metadata: TreeMetadata {
             variety: session.variety.clone(),
@@ -896,6 +1291,95 @@ fn import_unannotated_tree(
         confirmed_links: vec![],
         status: TreeStatus::Captured,
     })
+}
+
+fn import_root(source: &Path) -> PathBuf {
+    let nested = source.join("PalmAnnotate");
+    if nested.join("sessions.json").is_file() {
+        nested
+    } else {
+        source.to_path_buf()
+    }
+}
+
+fn resolve_tree_split(
+    source: &Path,
+    tree_name: &str,
+    requested: Option<&str>,
+    side_count: usize,
+) -> Result<String, AppError> {
+    let requested = requested
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "unknown");
+    let mut candidates = Vec::new();
+    if let Some(value) = requested {
+        candidates.push(value);
+    }
+    for value in ["field", "train", "val", "test", "unknown"] {
+        if !candidates.contains(&value) {
+            candidates.push(value);
+        }
+    }
+    for split in candidates {
+        let complete = (0..side_count).all(|side_index| {
+            resolve_tree_image(source, split, tree_name, side_index, None).is_ok()
+        });
+        if complete {
+            return Ok(split.to_string());
+        }
+    }
+    Err(AppError::NotFound(format!(
+        "Imported tree {tree_name} does not contain all {side_count} side images."
+    )))
+}
+
+fn resolve_tree_image(
+    source: &Path,
+    split: &str,
+    tree_name: &str,
+    side_index: usize,
+    saved_path: Option<&str>,
+) -> Result<PathBuf, AppError> {
+    let image_root = source.join("dataset").join("images").join(split);
+    if let Some(filename) = saved_path
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+    {
+        let candidate = image_root.join(filename);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    for extension in ["jpg", "jpeg", "png", "webp"] {
+        let candidate = image_root.join(format!("{tree_name}_{}.{}", side_index + 1, extension));
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(AppError::NotFound(format!(
+        "Imported tree {tree_name} is missing side {} in images/{split}.",
+        side_index + 1
+    )))
+}
+
+fn resolve_tree_label(
+    source: &Path,
+    split: &str,
+    tree_name: &str,
+    side_index: usize,
+) -> Option<PathBuf> {
+    let filename = format!("{tree_name}_{}.txt", side_index + 1);
+    [
+        source.join("Output TXT").join(split).join(&filename),
+        source.join("Output TXT").join(&filename),
+        source
+            .join("dataset")
+            .join("labels")
+            .join(split)
+            .join(&filename),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 fn json_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -1015,16 +1499,22 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
+            settings_get,
+            settings_save,
             session_list,
             session_save,
             session_delete,
+            session_export,
             sessions_import,
             sessions_import_folder,
             tree_load,
             tree_save,
+            tree_import_json,
             tree_delete,
             capture_commit,
+            camera_save_frame,
             tree_compute,
+            tree_export,
             tree_suggest,
             detector_run,
             depth_render
@@ -1130,7 +1620,7 @@ mod tests {
     }
 
     #[test]
-    fn imports_legacy_saf_manifest_and_rejects_conflicts() {
+    fn imports_legacy_saf_manifest_and_skips_existing_sessions() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("export");
         let images = source.join("dataset").join("images").join("field");
@@ -1140,6 +1630,20 @@ mod tests {
                 .save(images.join(format!("DAMIMAS_A21B_0001_{side}.jpg")))
                 .unwrap();
         }
+        let labels = source.join("dataset").join("labels").join("field");
+        let corrections = source.join("Output TXT").join("field");
+        fs::create_dir_all(&labels).unwrap();
+        fs::create_dir_all(&corrections).unwrap();
+        fs::write(
+            labels.join("DAMIMAS_A21B_0001_1.txt"),
+            "0 0.5 0.5 0.5 0.5\n",
+        )
+        .unwrap();
+        fs::write(
+            corrections.join("DAMIMAS_A21B_0001_1.txt"),
+            "2 0.5 0.5 0.5 0.5\n",
+        )
+        .unwrap();
         fs::write(
             source.join("sessions.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
@@ -1170,14 +1674,138 @@ mod tests {
         let tree = store.load_tree("legacy-session-tree-1").unwrap();
         assert_eq!(tree.sides.len(), 4);
         assert_eq!(tree.sides[0].image_width, 16);
+        assert_eq!(tree.sides[0].bboxes[0].class_id, 2);
+        assert_eq!(tree.split, "field");
         assert!(store
             .root()
             .join("dataset/images/field/DAMIMAS_A21B_0001_1.jpg")
             .is_file());
+        assert!(store
+            .root()
+            .join("Output TXT/field/DAMIMAS_A21B_0001_1.txt")
+            .is_file());
+
+        let merged = import_folder(&store, &source, "content://legacy").unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].trees.len(), 1);
+    }
+
+    #[test]
+    fn imports_nested_saf_root_and_preserves_non_field_split() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("selected").join("PalmAnnotate");
+        let images = source.join("dataset").join("images").join("val");
+        fs::create_dir_all(&images).unwrap();
+        for side in 1..=4 {
+            image::RgbImage::from_pixel(12, 10, image::Rgb([20, side * 10, 30]))
+                .save(images.join(format!("DAMIMAS_A21B_0002_{side}.png")))
+                .unwrap();
+        }
+        fs::write(
+            source.join("sessions.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "sessions": [{
+                    "id": "nested-session",
+                    "variety": "DAMIMAS",
+                    "blok": "A21B",
+                    "sideCount": 4,
+                    "trees": [{
+                        "name": "DAMIMAS_A21B_0002",
+                        "treeId": 2,
+                        "sideCount": 4,
+                        "split": "val"
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let store = AppStore::new(temp.path().join("app")).unwrap();
+        import_folder(&store, &temp.path().join("selected"), "content://selected").unwrap();
+        let tree = store.load_tree("nested-session-tree-2").unwrap();
+        assert_eq!(tree.split, "val");
+        assert!(tree.sides[0].image_path.ends_with(".png"));
+        assert!(store
+            .root()
+            .join("dataset/images/val/DAMIMAS_A21B_0002_1.png")
+            .is_file());
+    }
+
+    #[test]
+    fn imports_output_json_onto_existing_tree_and_drops_stale_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AppStore::new(temp.path()).unwrap();
+        store
+            .save_settings(&AppSettings {
+                export_uri: "content://export".into(),
+                export_name: "Export".into(),
+                ..AppSettings::default()
+            })
+            .unwrap();
+        store
+            .save_session(&Session {
+                id: "session-1".into(),
+                name: "DAMIMAS / A21B".into(),
+                variety: "DAMIMAS".into(),
+                block: "A21B".into(),
+                group_key: String::new(),
+                side_count: 4,
+                auto_id: true,
+                next_id: 1,
+                operator: String::new(),
+                export_uri: "content://export".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+                trees: vec![],
+            })
+            .unwrap();
+        let tree = export_tree();
+        store.save_tree(&tree).unwrap();
+
+        let mut output = build_output_v4(&tree);
+        let first = output.images.values_mut().next().unwrap();
+        first.annotations[0].class_id = 3;
+        first.annotations[0].class_name = "B4".into();
+        output
+            .confirmed_links
+            .push(palmannotate_core::ConfirmedLink {
+                link_id: "stale".into(),
+                side_a: 0,
+                bbox_id_a: "missing".into(),
+                side_b: 2,
+                bbox_id_b: "b2".into(),
+            });
+        let source = temp.path().join("restore.json");
+        fs::write(&source, serde_json::to_vec_pretty(&output).unwrap()).unwrap();
+
+        let imported = import_tree_annotations(&store, &source).unwrap();
+        assert_eq!(imported.tree_id, "tree-1");
+        let restored = store.load_tree("tree-1").unwrap();
+        assert_eq!(restored.sides[0].bboxes[0].class_name, "B4");
+        assert_eq!(restored.confirmed_links.len(), 1);
+    }
+
+    #[test]
+    fn json_restore_requires_a_matching_loaded_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AppStore::new(temp.path()).unwrap();
+        let source = temp.path().join("missing.json");
+        fs::write(
+            &source,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "version": 1,
+                "treeName": "NOT_LOADED",
+                "sides": [],
+                "confirmedLinks": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         assert!(matches!(
-            import_folder(&store, &source, "content://legacy"),
-            Err(AppError::Conflict(_))
+            import_tree_annotations(&store, &source),
+            Err(AppError::NotFound(_))
         ));
     }
 }
