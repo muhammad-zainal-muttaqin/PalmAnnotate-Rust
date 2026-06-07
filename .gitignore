@@ -20,6 +20,9 @@ src-tauri/gen/apple/
 *.apk
 *.aab
 *.aar
+# ...but the vendor Orbbec SDK AAR is a REQUIRED build input (Gradle slims it at
+# build time). Without it a fresh clone cannot build the native plugin. Keep it.
+!plugins/palm-native/android/libs/obsensor_v2.0.6_2026031801_release.aar
 
 # Logs / scratch
 *.log

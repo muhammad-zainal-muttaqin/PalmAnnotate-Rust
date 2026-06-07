@@ -97,6 +97,25 @@ What's committed and what's generated:
 
 ---
 
+## 2a. Required binary assets (committed to the repo)
+
+Two binaries are mandatory build inputs and are **committed to git** so a fresh
+clone builds without hunting for them:
+
+| Asset | Path | Size | Purpose |
+|---|---|---|---|
+| Detector model | `models/ffb-detector.onnx` (+ `models/detector.config.json`) | ~9.3 MB | On-device YOLO FFB detector (offline). Embedded into the app. |
+| Orbbec SDK | `plugins/palm-native/android/libs/obsensor_v2.0.6_2026031801_release.aar` | ~18.9 MB | Orbbec RGB-D camera SDK. Gradle slims it (drops 32-bit + firmware-updater) into `build/generated/orbbec/…` at build time — see `plugins/palm-native/android/build.gradle.kts`. |
+
+> `.gitignore` ignores `*.aar` (build-generated AARs) **except** the vendor Orbbec
+> AAR above, which is explicitly un-ignored. If you ever change the Orbbec SDK
+> version, update both the filename in `build.gradle.kts` (`vendorAar`) and the
+> un-ignore line in `.gitignore`, and re-test all Orbbec USB paths on hardware.
+
+The build **fails** without the Orbbec AAR (`zipTree` of a missing file) and the
+detector is non-functional without the ONNX model. Both are present after a normal
+`git clone` of this repo — no extra download step.
+
 ## 3. Build the release APK
 
 The Android build needs the Android env vars set. JDK/SDK/NDK are **not** assumed
