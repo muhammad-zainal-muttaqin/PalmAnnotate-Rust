@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-saf-write"
+description = "Enables the saf_write command without any pre-configured scope."
+commands.allow = ["saf_write"]
+
+[[permission]]
+identifier = "deny-saf-write"
+description = "Denies the saf_write command without any pre-configured scope."
+commands.deny = ["saf_write"]

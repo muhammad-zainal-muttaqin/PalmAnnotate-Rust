@@ -1,0 +1,32 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "PalmAnnotate main window capability",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "palm-native:allow-camera-status",
+    "palm-native:allow-camera-start",
+    "palm-native:allow-camera-capture",
+    "palm-native:allow-camera-stop",
+    "palm-native:allow-temp-delete",
+    "palm-native:allow-orbbec-status",
+    "palm-native:allow-orbbec-list",
+    "palm-native:allow-orbbec-request-permission",
+    "palm-native:allow-orbbec-open",
+    "palm-native:allow-orbbec-capture",
+    "palm-native:allow-orbbec-close",
+    "palm-native:allow-saf-pick-folder",
+    "palm-native:allow-saf-release-folder",
+    "palm-native:allow-saf-list",
+    "palm-native:allow-saf-read-to-temp",
+    "palm-native:allow-saf-copy-tree-to-temp",
+    "palm-native:allow-saf-copy-from-path",
+    "palm-native:allow-saf-write",
+    "palm-native:allow-saf-exists",
+    "palm-native:allow-saf-delete",
+    "geolocation:allow-check-permissions",
+    "geolocation:allow-request-permissions",
+    "geolocation:allow-get-current-position"
+  ]
+}

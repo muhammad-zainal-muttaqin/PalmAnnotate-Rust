@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-saf-release-folder"
+description = "Enables the saf_release_folder command without any pre-configured scope."
+commands.allow = ["saf_release_folder"]
+
+[[permission]]
+identifier = "deny-saf-release-folder"
+description = "Denies the saf_release_folder command without any pre-configured scope."
+commands.deny = ["saf_release_folder"]

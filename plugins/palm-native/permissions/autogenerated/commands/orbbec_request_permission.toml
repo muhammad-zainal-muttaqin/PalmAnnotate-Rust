@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-orbbec-request-permission"
+description = "Enables the orbbec_request_permission command without any pre-configured scope."
+commands.allow = ["orbbec_request_permission"]
+
+[[permission]]
+identifier = "deny-orbbec-request-permission"
+description = "Denies the orbbec_request_permission command without any pre-configured scope."
+commands.deny = ["orbbec_request_permission"]

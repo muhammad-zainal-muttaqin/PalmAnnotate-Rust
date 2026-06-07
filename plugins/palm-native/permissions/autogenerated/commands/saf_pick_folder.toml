@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-saf-pick-folder"
+description = "Enables the saf_pick_folder command without any pre-configured scope."
+commands.allow = ["saf_pick_folder"]
+
+[[permission]]
+identifier = "deny-saf-pick-folder"
+description = "Denies the saf_pick_folder command without any pre-configured scope."
+commands.deny = ["saf_pick_folder"]

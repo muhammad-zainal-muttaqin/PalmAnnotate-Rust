@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-orbbec-capture"
+description = "Enables the orbbec_capture command without any pre-configured scope."
+commands.allow = ["orbbec_capture"]
+
+[[permission]]
+identifier = "deny-orbbec-capture"
+description = "Denies the orbbec_capture command without any pre-configured scope."
+commands.deny = ["orbbec_capture"]

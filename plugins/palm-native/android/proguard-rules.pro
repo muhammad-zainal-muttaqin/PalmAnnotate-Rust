@@ -1,0 +1,2 @@
+-keep class dev.sawitulm.palmannotate.rust.nativebridge.** { *; }
+-keep class com.orbbec.obsensor.** { *; }

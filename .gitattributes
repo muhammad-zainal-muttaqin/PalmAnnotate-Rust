@@ -1,0 +1,9 @@
+# Normalize line endings to LF in the repo
+* text=auto eol=lf
+
+# Binary assets
+*.onnx binary
+*.png binary
+*.jpg binary
+*.svg binary
+*.keystore binary

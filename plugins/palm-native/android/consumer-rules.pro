@@ -1,0 +1,1 @@
+-keep class dev.sawitulm.palmannotate.rust.nativebridge.** { *; }

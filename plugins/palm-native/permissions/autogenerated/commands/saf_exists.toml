@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-saf-exists"
+description = "Enables the saf_exists command without any pre-configured scope."
+commands.allow = ["saf_exists"]
+
+[[permission]]
+identifier = "deny-saf-exists"
+description = "Denies the saf_exists command without any pre-configured scope."
+commands.deny = ["saf_exists"]

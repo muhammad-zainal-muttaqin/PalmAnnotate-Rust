@@ -1,0 +1,37 @@
+[package]
+name = "palmannotate"
+version = "0.1.0"
+description = "Offline field annotation for oil palm bunch datasets"
+authors = ["Sawit ULM"]
+edition = "2021"
+rust-version = "1.93.1"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "palmannotate_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+palmannotate-core = { path = "../crates/palmannotate-core" }
+tauri-plugin-palm-native = { path = "../plugins/palm-native" }
+tauri-plugin-geolocation = "2"
+thiserror = "2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndarray = "0.17"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["api-24", "load-dynamic", "ndarray"] }
+
+[dev-dependencies]
+tempfile = "3"

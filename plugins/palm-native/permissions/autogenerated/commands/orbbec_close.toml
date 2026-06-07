@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-orbbec-close"
+description = "Enables the orbbec_close command without any pre-configured scope."
+commands.allow = ["orbbec_close"]
+
+[[permission]]
+identifier = "deny-orbbec-close"
+description = "Denies the orbbec_close command without any pre-configured scope."
+commands.deny = ["orbbec_close"]

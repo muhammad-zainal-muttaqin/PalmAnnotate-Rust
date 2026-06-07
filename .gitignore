@@ -1,0 +1,30 @@
+# APK audit extracts (huge, regenerable)
+/.apk-audit/
+/.apk-audit-final/
+
+# Rust / Dioxus build output
+/dist/
+/target/
+/.toolchains/
+/.dx/
+
+# Android / Gradle build output (keep the project + build.gradle.kts, drop artifacts)
+**/build/
+**/.gradle/
+**/.cxx/
+src-tauri/gen/android/local.properties
+src-tauri/gen/android/app/src/main/jniLibs/
+src-tauri/gen/apple/
+
+# Packaged apps
+*.apk
+*.aab
+*.aar
+
+# Logs / scratch
+*.log
+.dx-serve.*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-saf-delete"
+description = "Enables the saf_delete command without any pre-configured scope."
+commands.allow = ["saf_delete"]
+
+[[permission]]
+identifier = "deny-saf-delete"
+description = "Denies the saf_delete command without any pre-configured scope."
+commands.deny = ["saf_delete"]

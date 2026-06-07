@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-saf-copy-tree-to-temp"
+description = "Enables the saf_copy_tree_to_temp command without any pre-configured scope."
+commands.allow = ["saf_copy_tree_to_temp"]
+
+[[permission]]
+identifier = "deny-saf-copy-tree-to-temp"
+description = "Denies the saf_copy_tree_to_temp command without any pre-configured scope."
+commands.deny = ["saf_copy_tree_to_temp"]
